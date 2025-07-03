@@ -55,7 +55,7 @@ def main():
                         help="DuckDB 快取資料庫的最終存檔路徑。") # 新增 cache-db-path 參數
     parser.add_argument("--table-name", default="market_ohlcv_data",
                         help="資料庫中儲存 OHLCV 數據的表格名稱。") # 中文化 help
-     parser.add_argument("--force-refresh", action="store_true",
+    parser.add_argument("--force-refresh", action="store_true",
                         help="若指定，則強制重新獲取所有數據，忽略快取。") # 新增 force-refresh 參數
     parser.add_argument("--process-uploads", action="store_true",
                         help="若指定，則處理 'uploads' 資料夾 (此功能待實現)。") # 中文化 help
