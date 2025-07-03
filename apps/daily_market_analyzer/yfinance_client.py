@@ -471,16 +471,62 @@ class YFinanceClient:
 
         # 如果所有 interval 都嘗試失敗
         logger.error(f"所有降級顆粒度 {self.FALLBACK_INTERVALS} 均無法為 {ticker} ({asset_class}) 在 {start_date_str} 到 {end_date_str} 範圍內回填任何數據。")
-        logger.info(f"===== 數據回填任務結束 (失敗): Ticker={ticker}, AssetClass={asset_class} =====")
-        # 更新日誌中所有仍在 pending 的狀態為最終失敗
+        logger.info(f"===== 數據回填任務結束 (處理完成 - 可能無數據或失敗): Ticker={ticker}, AssetClass={asset_class} =====")
+
+        # 更新日誌中所有仍在 pending 或僅記錄了 "no_data_for_interval" 的狀態
         for date_str_in_range in request_date_range_str:
-            # 只有當狀態仍然是初始的 "pending" 或某些中間的非成功狀態時才更新為 "failed_all_intervals"
-            current_status = execution_log[date_str_in_range][ticker].get('status', 'pending')
-            if current_status in ["pending", "failed_chunk", "no_data_for_interval", "failed_datetime_processing_in_log", "unknown_chunk_outcome"]:
-                 execution_log[date_str_in_range][ticker] = {
-                    "status": "failed_all_intervals", "interval": None, "count": 0,
-                    "message": f"All API fetch attempts failed for {date_str_in_range}." # 更精確的消息
+            current_log_entry = execution_log.get(date_str_in_range, {}).get(ticker, {})
+            current_status = current_log_entry.get('status', 'pending')
+            current_message = current_log_entry.get('message', '')
+
+            # 檢查此日期是否在所有 interval 嘗試中都明確是 "no_data_for_interval" 或類似的 "無數據" 狀態
+            # 並且沒有被標記為更嚴重的錯誤如 "failed_chunk" 或 "skipped_1m..." (除非skipped後也沒有其他數據)
+
+            # 簡化判斷：如果 status 不是以 'success_' 開頭，也不是 'skipped_1m_due_to_30day_limit' (除非count=0),
+            # 也不是明確的 'failed_chunk' 或其他系統錯誤，則認為可能是 'no_data_available'
+            # 一個更精確的方法是追蹤每個日期的嘗試歷史，但目前 execution_log 結構可能不直接支持。
+            # 我們將基於最終的 current_status 進行判斷。
+
+            if current_status.startswith('success_'): # 如果已經成功，則不變
+                continue
+
+            # 如果狀態是 'no_data_for_interval' (表示至少有一個 interval 嘗試過且返回無數據)
+            # 或者 'skipped_1m_due_to_30day_limit' 但沒有後續成功獲取 (count=0)
+            # 並且沒有被標記為更嚴重的 'failed_chunk' 或 'failed_all_intervals' (由 chunk 失敗導致)
+            # 這些可以被認為是 'no_data_available'
+
+            # 判斷是否所有嘗試都是 "無數據" 類型，而不是系統錯誤
+            # 如果 message 中包含 "No data found for" 或 "Market closed", 並且 status 不是 success
+            # 則可以認為是 no_data_available
+            is_consistently_no_data = True # 假設
+            if "failed" in current_status.lower() or "error" in current_status.lower(): # 如果已經是某種失敗狀態
+                 is_consistently_no_data = False
+
+            # 如果沒有發生過 chunk 級別的錯誤，並且最終狀態是 no_data_for_interval (或其他非成功狀態)
+            # 則認為是 no_data_available
+            # 注意：`execution_log` 在此處可能已經被 `failed_chunk` 等覆蓋了。
+            # 我們需要一種方法來判斷失敗的根本原因是 "API說沒數據" 還是 "系統無法獲取數據"
+            # 目前的 execution_log 更新邏輯是，如果 chunk 失敗，會標記為 failed_chunk。
+            # 如果所有 interval 的所有 chunk 都返回空（但API本身沒報錯），則會是 no_data_for_interval。
+
+            # 這裡的邏輯是：如果最終狀態不是成功，也不是一個明確的 chunk 獲取錯誤，
+            # 並且是 'no_data_for_interval' 或 'pending' (表示從未有數據)，則認為是 'no_data_available'
+            if current_status in ["pending", "no_data_for_interval", "unknown_chunk_outcome"] or \
+               (current_status == "skipped_1m_due_to_30day_limit" and current_log_entry.get("count", 0) == 0):
+                execution_log[date_str_in_range][ticker] = {
+                    "status": "no_data_available", "interval": None, "count": 0,
+                    "message": f"After all attempts, no data was reported as available by the API for {date_str_in_range}."
                 }
+            elif current_status not in ["failed_chunk", "failed_datetime_processing_in_log"] and \
+                 not current_status.startswith("success_"): # 其他所有未成功且非特定 chunk 失敗的情況
+                 # 這些可能是 'failed_all_intervals' (如果之前被這樣標記過)
+                 # 或者其他未預期的狀態。如果不是上面 no_data_available 的情況，則歸為 failed_all_intervals
+                execution_log[date_str_in_range][ticker] = {
+                    "status": "failed_all_intervals", "interval": None, "count": 0,
+                    "message": f"All API fetch attempts failed for {date_str_in_range}. Original status: {current_status}, Msg: {current_message}"
+                }
+            # else: 狀態是 failed_chunk 或其他已確定的錯誤，保持不變
+
         return None, execution_log
 
     def get_futures_data(self, futures_id: str, start_date: str, end_date: str) -> tuple[pd.DataFrame | None, dict]:
