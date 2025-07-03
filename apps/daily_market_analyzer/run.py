@@ -45,8 +45,12 @@ def main():
     parser.add_argument("--tickers", required=True, help="要分析的標的列表，以逗號分隔 (例如: AAPL,MSFT)。") # 中文化 help
     parser.add_argument("--start-date", required=True, help="分析起始日期 (格式: YYYY-MM-DD)。") # 中文化 help
     parser.add_argument("--end-date", required=True, help="分析結束日期 (格式: YYYY-MM-DD)。") # 中文化 help
-    parser.add_argument("--db-path", default="data_workspace/daily_market_analyzer.duckdb",
-                        help="DuckDB 資料庫檔案路徑。") # 中文化 help
+    parser.add_argument("--db-path", default="data_workspace/daily_market_analyzer.duckdb", # 保留現有的 db-path 作為主要/永久數據庫的路徑
+                        help="主分析資料庫的完整路徑 (例如: data_workspace/daily_market_analysis.duckdb)。") # 更新 help 文字
+    parser.add_argument("--db-name", default="daily_market_analysis.duckdb", # 新增/調整 db-name
+                        help="主分析資料庫的檔案名稱 (非完整路徑)。") # 新增 help 文字以符合指令
+    parser.add_argument("--cache-db-path",
+                        help="DuckDB 快取資料庫的最終存檔路徑。") # 新增 cache-db-path 參數
     parser.add_argument("--table-name", default="market_ohlcv_data",
                         help="資料庫中儲存 OHLCV 數據的表格名稱。") # 中文化 help
     parser.add_argument("--process-uploads", action="store_true",
