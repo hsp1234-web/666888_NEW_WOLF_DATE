@@ -54,8 +54,8 @@ class YFinanceClient:
         # 日線及以上: 1d, 5d, 1wk, 1mo, 3mo
         #   - 日線以上通常可以拉取較長歷史
 
-        print(f"INFO: YFinanceClient (Data Hydrator) 初始化完畢，快取目錄: {self.cache_dir}")
-        print(f"INFO: 區間降級鏈: {self.FALLBACK_INTERVALS}")
+        # logger.info(f"YFinanceClient (Data Hydrator) 初始化完畢。") # 保留一個更通用的初始化日誌
+        logger.info(f"區間降級鏈設定為: {self.FALLBACK_INTERVALS}")
 
     def _get_chunk_size_for_interval(self, interval: str) -> int:
         """
