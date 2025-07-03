@@ -19,37 +19,101 @@ class ReportGenerator:
                                   target_tickers: list[str], overall_execution_log: dict) -> str:
         interval_counts = {}
         final_ticker_status = {}
+        # 用於追蹤每個成功標的是來自 API 還是快取
+        # 預設為 "api", 如果 message 中明確提到 cache, 則改為 "cache"
+        ticker_source_info = {ticker: "unknown" for ticker in target_tickers}
+        api_success_count = 0
+        cache_success_count = 0
+
         for ticker in target_tickers:
-            final_ticker_status[ticker] = "no_data"
-            found_success_for_ticker = False
+            final_ticker_status[ticker] = "no_data" # 預設為沒有數據
+            found_any_data_for_ticker = False # 標記是否為此 ticker 找到了任何種類的數據
+
+            # 迭代日期以確定 ticker 的最終狀態和數據來源
+            # 我們只需要 ticker 在任何一天成功一次即可認為該 ticker 成功
+            # 並且來源（API/快取）以第一次成功獲取時的訊息為準（或最明確的訊息）
             for date_key in pd.date_range(start=overall_start_date_str, end=overall_end_date_str).strftime('%Y-%m-%d'):
                 log_entry = overall_execution_log.get(date_key, {}).get(ticker, {})
-                if log_entry.get('status') == 'success' and log_entry.get('count', 0) > 0:
-                    final_ticker_status[ticker] = "success"
-                    interval = log_entry.get('interval')
-                    if interval: interval_counts[interval] = interval_counts.get(interval, 0) + 1
-                    found_success_for_ticker = True
-                elif not found_success_for_ticker and \
-                     (log_entry.get('status') == 'skipped_1m_due_to_30day_limit' or \
-                      (log_entry.get('status') == 'success_partial' and log_entry.get('count', 0) > 0) or \
-                      (log_entry.get('status') == 'success' and log_entry.get('count', 0) > 0 and log_entry.get('interval') != '1m')):
-                    final_ticker_status[ticker] = "fallback"
-                    interval = log_entry.get('interval')
-                    if interval: interval_counts[interval] = interval_counts.get(interval, 0) + 1
+                status = log_entry.get('status')
+                count = log_entry.get('count', 0)
+                message = log_entry.get('message', "").lower() # 轉小寫以便搜尋 "cache"
 
-        successful_tickers_count = sum(1 for status in final_ticker_status.values() if status in ["success", "fallback"])
+                current_ticker_marked_successful = final_ticker_status[ticker] in ["success", "fallback"]
+
+                if status == 'success' and count > 0:
+                    if not current_ticker_marked_successful: # 首次將此 ticker 標記為成功
+                        final_ticker_status[ticker] = "success"
+                        if "cache" in message or "cached" in message:
+                            ticker_source_info[ticker] = "cache"
+                        else:
+                            ticker_source_info[ticker] = "api"
+
+                    interval = log_entry.get('interval')
+                    if interval: interval_counts[interval] = interval_counts.get(interval, 0) + 1
+                    found_any_data_for_ticker = True # 標記找到了數據
+                    # break # 找到一個日期的成功數據就足以判斷此 ticker 的狀態和來源
+
+                elif not current_ticker_marked_successful and \
+                     (status == 'skipped_1m_due_to_30day_limit' or \
+                      status == 'success_partial' or \
+                      (status == 'success' and count > 0)) and \
+                      log_entry.get('interval'): # 確保有 interval，表示某種數據被獲取
+                    # 這種情況通常是 fallback，例如 1m 被跳過但獲取了 5m
+                    final_ticker_status[ticker] = "fallback" # 標記為 fallback
+                    if "cache" in message or "cached" in message:
+                         ticker_source_info[ticker] = "cache" # 假設 fallback 也可能來自快取
+                    else:
+                         ticker_source_info[ticker] = "api"
+
+                    interval = log_entry.get('interval')
+                    if interval: interval_counts[interval] = interval_counts.get(interval, 0) + 1
+                    found_any_data_for_ticker = True
+                    # break
+
+            # 在日期循環外，根據 ticker_source_info 更新 api/cache 計數
+            if final_ticker_status[ticker] in ["success", "fallback"]:
+                if ticker_source_info[ticker] == "cache":
+                    cache_success_count += 1
+                elif ticker_source_info[ticker] == "api": # 明確是 api 或默認為 api
+                    api_success_count += 1
+                # 如果 ticker_source_info[ticker] 仍是 "unknown" (理論上不應該，因為成功時會設定)
+                # 這裡可以選擇一個預設，例如計入 api_success_count
+                elif ticker_source_info[ticker] == "unknown":
+                    # 這種情況可能發生在 status 是 success 但 message 為空或不含 cache 關鍵字
+                    # 根據需求，可以將其歸為 API 或設立一個 "unknown_source_count"
+                    api_success_count +=1 # 默認為 API
+
+        successful_tickers_count = api_success_count + cache_success_count
+
         summary_parts = []
-        if successful_tickers_count == len(target_tickers):
-            summary_parts.append(f"成功為所有 {len(target_tickers)} 個標的獲取數據。")
+        if successful_tickers_count == len(target_tickers) and len(target_tickers) > 0:
+            summary_parts.append(f"任務成功，為全部 {len(target_tickers)} 個目標標的獲取或更新了數據。")
         elif successful_tickers_count > 0:
-            summary_parts.append(f"成功為 {successful_tickers_count} 個標的獲取數據，{len(target_tickers) - successful_tickers_count} 個標的數據獲取不完整或失敗。")
+            summary_parts.append(f"任務部分成功，共為 {successful_tickers_count} 個 (總計 {len(target_tickers)}) 目標標的獲取或更新了數據。")
         else:
-            summary_parts.append(f"未能為任何目標標的成功獲取數據。")
+            summary_parts.append(f"任務未能為任何目標標的 ({len(target_tickers)} 個) 成功獲取數據。")
+
+        if successful_tickers_count > 0:
+            source_details = []
+            if api_success_count > 0:
+                source_details.append(f"{api_success_count} 個從 API 新獲取")
+            if cache_success_count > 0:
+                source_details.append(f"{cache_success_count} 個命中本地快取")
+            if source_details: # 僅當有來源細節時才加入
+                 summary_parts.append(f"其中，{ ' 和 '.join(source_details) }。")
+            else: # 如果 api_success_count 和 cache_success_count 都是0 (理論上不應與 successful_tickers_count > 0 同時發生)
+                  # 或者如果 ticker_source_info 始終是 unknown 且沒有正確計數
+                  pass # 保持總結簡潔
+
+
         if interval_counts:
             common_intervals = sorted(interval_counts.items(), key=lambda item: item[1], reverse=True)
             summary_parts.append(f"主要獲取到的數據顆粒度包括：{', '.join([f'{i[0]}' for i in common_intervals])}。")
-        else:
+        elif successful_tickers_count > 0 : # 如果有成功獲取，但 interval_counts 為空 (不太可能)
+             summary_parts.append("成功獲取數據，但數據顆粒度資訊缺失。")
+        else: # 沒有成功獲取，也沒有 interval_counts
             summary_parts.append("未獲取到有效數據顆粒度。")
+
         summary_text = " ".join(summary_parts)
         header_lines = ["# 數據回填與市場分析報告\n", "## 任務總結",
                         f"- **執行時間**: {report_generation_time.strftime('%Y-%m-%d %H:%M:%S UTC%z')}",
@@ -70,27 +134,35 @@ class ReportGenerator:
             if log_entry:
                 actual_status = log_entry.get('status'); actual_interval = log_entry.get('interval')
                 actual_count = log_entry.get('count', 0); message = log_entry.get('message', "")
-                if actual_status == 'success':
-                    is_fallback = False
-                    if actual_interval and actual_interval != '1m' and not ticker.startswith('^') and \
-                       ((message and "skipped" in message.lower() and "1m" in message.lower()) or \
-                        (not (message and "skipped" in message.lower() and "1m" in message.lower()))):
-                        is_fallback = True
-                    if is_fallback:
-                        status_display = f"⚠️ **{ticker}**: 降級至 **{actual_interval}** 數據 ({actual_count} 筆)."
-                        reason_display = "*(註：1分鐘線數據超出回溯限制或不可用)*" if "skipped" in message.lower() and "1m" in message.lower() else f"*(註：已獲取 {actual_interval} 數據)*"
-                    else: status_display = f"✅ **{ticker}**: 成功獲取 **{actual_interval}** 數據 ({actual_count} 筆)."
+                if actual_status == 'success' and actual_count > 0:
+                    status_display = f"✅ **{ticker}**: 成功獲取 **{actual_interval}** 數據 ({actual_count} 筆)."
+                    # 檢查是否有降級情況，若有則在 reason_display 中註明
+                    is_fallback_situation = actual_interval and actual_interval != '1m' and not ticker.startswith('^') and \
+                                           ("skipped" in message.lower() and "1m" in message.lower())
+                    if is_fallback_situation:
+                        reason_display = f"*(註：1分鐘線數據超出回溯限制或不可用，已使用 {actual_interval})*"
+                    elif message and message.strip() and not message.startswith("Final data for"): # 如果有其他重要訊息
+                        reason_display = f"*(註：{message})*"
+                    # else: # 若無特殊情況，則 reason_display 保持空
                 elif actual_status in ['no_data_for_interval', 'failed_all_intervals'] or \
                      (actual_status == 'skipped_1m_due_to_30day_limit' and actual_count == 0 and not actual_interval):
                     status_display = f"❌ **{ticker}**: 未能獲取到當日數據."
                     if "Market closed" in message: reason_display = "*(註：市場休市)*"
                     elif "All intervals failed" in message or "No data found for" in message : reason_display = "*(註：所有嘗試均失敗或無數據)*"
                     elif actual_status == 'skipped_1m_due_to_30day_limit': reason_display = "*(註：1分鐘數據不可用且無其他替代數據)*"
-                    else: reason_display = f"*(註：{message})*"
-                elif actual_status == 'skipped_1m_due_to_30day_limit':
-                    status_display = f"❔ **{ticker}**: 1分鐘數據嘗試被跳過."; reason_display = f"*(註：{message})*"
-                else: status_display = f"❌ **{ticker}**: 數據處理時發生問題."; reason_display = f"*(註：狀態 [{actual_status}]. 詳細: {message})*"
-            else: status_display = f"❔ **{ticker}**: 無當日處理記錄."; reason_display = "*(註：可能當日未執行處理、無數據或過程被跳過)*"
+                    else: reason_display = f"*(註：{message if message else '未知原因'})*" # 確保有訊息
+                elif actual_status == 'skipped_1m_due_to_30day_limit' and actual_count > 0 and actual_interval: # 雖然跳過1m，但成功獲取了其他 interval
+                    status_display = f"✅ **{ticker}**: 成功獲取 **{actual_interval}** 數據 ({actual_count} 筆)."
+                    reason_display = f"*(註：1分鐘線數據超出回溯限制或不可用，已使用 {actual_interval})*"
+                elif actual_status == 'skipped_1m_due_to_30day_limit': # 跳過1m，且沒有獲取到其他數據
+                    status_display = f"❔ **{ticker}**: 1分鐘數據嘗試因限制被跳過，且無替代數據."
+                    reason_display = f"*(註：{message})*"
+                else: # 其他所有非明確成功的狀態，且未被上述條件捕獲的，都視為問題或失敗
+                    status_display = f"❌ **{ticker}**: 數據獲取或處理存在問題."
+                    reason_display = f"*(註：狀態 [{actual_status}], 訊息: {message if message else '無詳細訊息'})*"
+            else: # 無 log_entry
+                status_display = f"❔ **{ticker}**: 無當日處理記錄."
+                reason_display = "*(註：可能當日未執行處理、未請求該標的、無數據或過程被跳過)*"
             lines.append(status_display + (f" {reason_display}" if reason_display else ""))
         return "\n".join(lines)
 
