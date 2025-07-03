@@ -39,6 +39,76 @@ except ModuleNotFoundError as e:
     #     print("DEBUG: 'apps/' or 'apps/daily_market_analyzer/' directory not found from current working directory.")
     raise
 
+def process_single_ticker(ticker, start_date, end_date, db_path, cache_db_path, table_name, force_refresh):
+    """
+    處理單一金融標的的完整數據回填與寫入邏輯。
+    此函數將在獨立的進程中執行。
+    """
+    # 在新進程中重新初始化客戶端和管理器。
+    # 注意：若 DBManager 和 YFinanceClient 的實例化涉及複雜狀態或資源 (如資料庫連線池)，
+    # 可能需更細緻處理以確保進程安全。對 DuckDB 這類嵌入式資料庫，各進程獨立連線通常安全。
+
+    # 為了讓日誌能區分進程，加入 PID
+    pid = os.getpid()
+    print(f"--- [PID:{pid}] 開始處理標的: {ticker} ---")
+
+    # 重新初始化 DBManager 和 YFinanceClient。
+    # 需確保這些類別的初始化過程輕量，或能在多進程環境下安全獨立運行。
+    # 若共享不可序列化資源，則需調整設計（例如：透過參數傳遞資源，或使用進程安全的管理器）。
+    try:
+        # 設定專案路徑，確保在新進程中可以正確導入其他模組。
+        # 此設定通常在主模組載入時已完成，但若進程啟動方式不同，可能需重新設定。
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root_for_process = os.path.abspath(os.path.join(current_file_dir, '..', '..'))
+        if project_root_for_process not in sys.path:
+            sys.path.insert(0, project_root_for_process)
+            # print(f"DEBUG [PID:{pid}]: 為進程新增專案根目錄到 sys.path: {project_root_for_process}")
+
+        # 以下導入語句已移至檔案頂部。
+        # 在多進程環境下，子進程會繼承父進程的已導入模組，通常無需在此重新動態導入。
+        # from apps.daily_market_analyzer.db_manager import DBManager
+        # from apps.daily_market_analyzer.yfinance_client import YFinanceClient
+
+        db_manager_process = DBManager(db_path=db_path)
+        # 確保 cache_db_path 正確傳遞給 YFinanceClient
+        yf_client_process = YFinanceClient(db_manager=db_manager_process, cache_db_path=cache_db_path)
+    except Exception as e_init:
+        print(f"錯誤 [PID:{pid}]: 初始化標的 {ticker} 的處理器時發生錯誤: {e_init}")
+        return None, {start_date: {ticker: {"status": "initialization_error", "message": str(e_init), "count": 0, "interval": None}}}
+
+
+    # 執行數據回填
+    # 注意：hydrate_data_range 應設計為不依賴外部狀態 (除了傳入的參數)
+    try:
+        hydrated_df, execution_log = yf_client_process.hydrate_data_range(
+            ticker, start_date, end_date,
+            db_table_name=table_name,
+            force_refresh=force_refresh
+        )
+    except Exception as e_hydrate:
+        print(f"錯誤 [PID:{pid}]: 處理標的 {ticker} 的 hydrate_data_range 時發生錯誤: {e_hydrate}")
+        # 建立一個基本的錯誤日誌條目
+        error_log = {}
+        temp_date = datetime.strptime(start_date, "%Y-%m-%d")
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+        while temp_date <= end_date_obj:
+            date_str = temp_date.strftime("%Y-%m-%d")
+            error_log.setdefault(date_str, {}).setdefault(ticker, {
+                "status": "hydration_error",
+                "message": str(e_hydrate),
+                "count": 0,
+                "interval": None
+            })
+            temp_date += timedelta(days=1)
+        return None, error_log
+
+    # 根據作戰計畫，單一 Ticker 處理函數只負責回填快取。
+    # 主數據庫的寫入將由主進程在所有平行任務完成後統一處理。
+    # 因此，這裡不需要 upsert_data 到主數據庫。yf_client.hydrate_data_range 內部已處理快取DB的寫入。
+
+    print(f"--- [PID:{pid}] 標的: {ticker} 處理完畢 ---")
+    return hydrated_df, execution_log
+
 def main():
     """
     主執行函數 for Daily Market Analyzer。
@@ -236,73 +306,3 @@ if __name__ == "__main__":
     #         print(f"ERROR: Late ModuleNotFoundError in daily_market_analyzer __main__: {e}") # 中文化
 
     main()
-
-def process_single_ticker(ticker, start_date, end_date, db_path, cache_db_path, table_name, force_refresh):
-    """
-    處理單一金融標的的完整數據回填與寫入邏輯。
-    此函數將在獨立的進程中執行。
-    """
-    # 在新進程中重新初始化客戶端和管理器。
-    # 注意：若 DBManager 和 YFinanceClient 的實例化涉及複雜狀態或資源 (如資料庫連線池)，
-    # 可能需更細緻處理以確保進程安全。對 DuckDB 這類嵌入式資料庫，各進程獨立連線通常安全。
-
-    # 為了讓日誌能區分進程，加入 PID
-    pid = os.getpid()
-    print(f"--- [PID:{pid}] 開始處理標的: {ticker} ---")
-
-    # 重新初始化 DBManager 和 YFinanceClient。
-    # 需確保這些類別的初始化過程輕量，或能在多進程環境下安全獨立運行。
-    # 若共享不可序列化資源，則需調整設計（例如：透過參數傳遞資源，或使用進程安全的管理器）。
-    try:
-        # 設定專案路徑，確保在新進程中可以正確導入其他模組。
-        # 此設定通常在主模組載入時已完成，但若進程啟動方式不同，可能需重新設定。
-        current_file_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root_for_process = os.path.abspath(os.path.join(current_file_dir, '..', '..'))
-        if project_root_for_process not in sys.path:
-            sys.path.insert(0, project_root_for_process)
-            # print(f"DEBUG [PID:{pid}]: 為進程新增專案根目錄到 sys.path: {project_root_for_process}")
-
-        # 以下導入語句已移至檔案頂部。
-        # 在多進程環境下，子進程會繼承父進程的已導入模組，通常無需在此重新動態導入。
-        # from apps.daily_market_analyzer.db_manager import DBManager
-        # from apps.daily_market_analyzer.yfinance_client import YFinanceClient
-
-        db_manager_process = DBManager(db_path=db_path)
-        # 確保 cache_db_path 正確傳遞給 YFinanceClient
-        yf_client_process = YFinanceClient(db_manager=db_manager_process, cache_db_path=cache_db_path)
-    except Exception as e_init:
-        print(f"錯誤 [PID:{pid}]: 初始化標的 {ticker} 的處理器時發生錯誤: {e_init}")
-        return None, {start_date: {ticker: {"status": "initialization_error", "message": str(e_init), "count": 0, "interval": None}}}
-
-
-    # 執行數據回填
-    # 注意：hydrate_data_range 應設計為不依賴外部狀態 (除了傳入的參數)
-    try:
-        hydrated_df, execution_log = yf_client_process.hydrate_data_range(
-            ticker, start_date, end_date,
-            db_table_name=table_name,
-            force_refresh=force_refresh
-        )
-    except Exception as e_hydrate:
-        print(f"錯誤 [PID:{pid}]: 處理標的 {ticker} 的 hydrate_data_range 時發生錯誤: {e_hydrate}")
-        # 建立一個基本的錯誤日誌條目
-        error_log = {}
-        temp_date = datetime.strptime(start_date, "%Y-%m-%d")
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        while temp_date <= end_date_obj:
-            date_str = temp_date.strftime("%Y-%m-%d")
-            error_log.setdefault(date_str, {}).setdefault(ticker, {
-                "status": "hydration_error",
-                "message": str(e_hydrate),
-                "count": 0,
-                "interval": None
-            })
-            temp_date += timedelta(days=1)
-        return None, error_log
-
-    # 根據作戰計畫，單一 Ticker 處理函數只負責回填快取。
-    # 主數據庫的寫入將由主進程在所有平行任務完成後統一處理。
-    # 因此，這裡不需要 upsert_data 到主數據庫。yf_client.hydrate_data_range 內部已處理快取DB的寫入。
-
-    print(f"--- [PID:{pid}] 標的: {ticker} 處理完畢 ---")
-    return hydrated_df, execution_log
