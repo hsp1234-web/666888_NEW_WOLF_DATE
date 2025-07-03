@@ -10,6 +10,7 @@ import argparse
 import sys
 import os
 import shutil # <--- 新增導入
+import logging # <--- 新增導入
 from datetime import datetime
 import pandas as pd
 
@@ -56,8 +57,20 @@ def main():
                         help="DuckDB 快取資料庫檔案路徑。") # 中文化 help
     parser.add_argument("--process-uploads", action="store_true",
                         help="若指定，則處理 'uploads' 資料夾 (此功能待實現)。") # 中文化 help
-
     args = parser.parse_args()
+
+    # --- 「哨兵檢查哨」開始 ---
+    try:
+        start_date_obj = datetime.strptime(args.start_date, "%Y-%m-%d").date()
+        end_date_obj = datetime.strptime(args.end_date, "%Y-%m-%d").date()
+    except ValueError:
+        logging.critical(f"INVALID_DATE_FORMAT: 日期格式錯誤 - ({args.start_date} 或 {args.end_date})。請使用 YYYY-MM-DD 格式。任務已終止。")
+        sys.exit(1)
+
+    if start_date_obj > end_date_obj:
+        logging.critical(f"INVALID_DATE_RANGE: 指令錯誤 - 起始日期 ({args.start_date}) 不得晚於結束日期 ({args.end_date})。任務已終止。")
+        sys.exit(1)
+    # --- 「哨兵檢查哨」結束 ---
 
     print("--- 每日市場洞察報告引擎 v12.0 ---") # 更新版本號
     overall_start_time = datetime.now()
