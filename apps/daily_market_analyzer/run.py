@@ -49,6 +49,8 @@ def main():
                         help="DuckDB 資料庫檔案路徑。") # 中文化 help
     parser.add_argument("--table-name", default="market_ohlcv_data",
                         help="資料庫中儲存 OHLCV 數據的表格名稱。") # 中文化 help
+    parser.add_argument("--asset-class", default="stock", choices=['stock', 'future', 'crypto'],
+                        help="要分析的資產類別 (預設: stock)。") # 中文化 help
     parser.add_argument("--process-uploads", action="store_true",
                         help="若指定，則處理 'uploads' 資料夾 (此功能待實現)。") # 中文化 help
 
@@ -79,9 +81,33 @@ def main():
     overall_execution_log = {} # 用於聚合所有 tickers 的執行日誌
 
     for ticker in tickers_list:
-        print(f"\n--- 開始處理標的: {ticker} ---") # 中文化
-        # hydrate_data_range 現在返回 (DataFrame | None, dict_execution_log)
-        hydrated_df, ticker_execution_log = yf_client.hydrate_data_range(ticker, args.start_date, args.end_date)
+        print(f"\n--- 開始處理標的: {ticker} (資產類別: {args.asset_class}) ---") # 中文化
+
+        hydrated_df = None
+        ticker_execution_log = {}
+
+        if args.asset_class == 'stock':
+            hydrated_df, ticker_execution_log = yf_client.hydrate_data_range(
+                ticker, args.start_date, args.end_date, asset_class='stock' # 明確傳遞
+            )
+        elif args.asset_class == 'future':
+            hydrated_df, ticker_execution_log = yf_client.get_futures_data(
+                ticker, args.start_date, args.end_date
+            )
+        elif args.asset_class == 'crypto':
+            hydrated_df, ticker_execution_log = yf_client.get_crypto_data(
+                ticker, args.start_date, args.end_date
+            )
+        else:
+            # 理論上 argparse 的 choices 已經限制了這個情況，但作為防禦性編程
+            print(f"錯誤：未知的資產類別 '{args.asset_class}'。將跳過標的 {ticker}。") # 中文化
+            # 可以在此處填充一個表示錯誤的 ticker_execution_log
+            request_date_range_str = [d.strftime("%Y-%m-%d") for d in pd.date_range(args.start_date, args.end_date)]
+            for date_str_in_range in request_date_range_str:
+                ticker_execution_log.setdefault(date_str_in_range, {})[ticker] = {
+                    "status": "error_unknown_asset_class", "interval": None, "count": 0,
+                    "message": f"未知的資產類別: {args.asset_class}"
+                }
 
         # 合併 ticker 的執行日誌到總日誌中
         for date_key, ticker_daily_log_value in ticker_execution_log.items():

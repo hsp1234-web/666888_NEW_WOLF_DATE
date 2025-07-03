@@ -19,6 +19,12 @@ import pandas as pd
 import time
 import os
 from datetime import datetime, timedelta
+import logging
+import requests # 為了捕獲 HTTPError
+
+# 設定日誌記錄器
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
 
 class YFinanceClient:
     """
@@ -115,108 +121,124 @@ class YFinanceClient:
         Returns:
             pd.DataFrame | None: 包含市場數據的 DataFrame，若失敗則返回 None。
         """
-        print(f"INFO: fetch_single_chunk: Ticker={ticker}, Interval={interval}, Start={chunk_start_date_str}, End(Exclusive)={chunk_end_date_str}")
-        try:
-            stock = yf.Ticker(ticker)
-            # auto_adjust=True: 自動調整OHLC，移除 'Adjusted Close' 和 'Dividends', 'Stock Splits'
-            # prepost=False: 通常對於歷史回填，我們不需要盤前盤後數據，除非特定需求
-            data = stock.history(start=chunk_start_date_str,
-                                 end=chunk_end_date_str,
-                                 interval=interval,
-                                 auto_adjust=True,
-                                 prepost=False)
+        logger.info(f"fetch_single_chunk: Ticker={ticker}, Interval={interval}, Start={chunk_start_date_str}, End(Exclusive)={chunk_end_date_str}")
+        max_retries = 3
+        base_delay = 1  # 秒
 
-            if data is None or data.empty:
-                print(f"警告: fetch_single_chunk: {ticker} 在 {chunk_start_date_str} 到 {chunk_end_date_str} (間隔: {interval}) 無數據返回。")
-                return None
-
-            # 數據標準化
-            # --- 開始標準化 ---
-            # 步驟 1: 將索引（通常是日期時間）轉換為列
-            if isinstance(data.index, pd.DatetimeIndex):
-                data = data.reset_index()
-
-            # 步驟 2: 將所有列名轉為小寫
-            data.columns = [col.lower() for col in data.columns]
-
-            # 步驟 3: 統一日期時間列名為 'datetime'
-            # yfinance 對於日線或更粗顆粒度數據，列名可能是 'date'
-            if 'date' in data.columns and 'datetime' not in data.columns:
-                data.rename(columns={'date': 'datetime'}, inplace=True)
-            # 如果 'Datetime' (大寫D) 存在且 'datetime' 不存在 (雖然前面已轉小寫，但多一層保護)
-            elif 'Datetime' in data.columns and 'datetime' not in data.columns: # 雖然已 lower()，但以防萬一
-                 data.rename(columns={'Datetime': 'datetime'}, inplace=True)
-
-
-            # 步驟 4: 檢查 'datetime' 列是否存在，如果不存在，則是一個問題
-            if 'datetime' not in data.columns:
-                print(f"錯誤: fetch_single_chunk: 標準化後 DataFrame 中缺少 'datetime' 欄位。股票: {ticker}, 間隔: {interval}。可用欄位: {data.columns.tolist()}")
-                # 考慮是否返回 None 或拋出異常，目前返回 None 讓上層處理
-                return None
-
-            # 步驟 5: 確保 'datetime' 列是 pandas Timestamp 物件且為 UTC 時區
-            # yfinance 通常返回的日期時間已處理好時區 (對於分鐘線通常是交易所時區，日線是 UTC date)
-            # 但此處我們要確保它是 UTC Timestamp
+        for attempt in range(max_retries):
             try:
-                data['datetime'] = pd.to_datetime(data['datetime'])
-                if data['datetime'].dt.tz is None:
-                    # 如果是 naive datetime (例如 yfinance 返回的 date 物件被轉為不帶時區的 timestamp)
-                    # 假設它是 UTC 日期，或者根據需要設定為特定交易所時區再轉UTC
-                    # 為了簡化，這裡直接本地化為 UTC。對於日線數據，時間部分通常是 00:00:00。
-                    data['datetime'] = data['datetime'].dt.tz_localize('UTC')
+                stock = yf.Ticker(ticker)
+                # auto_adjust=True: 自動調整OHLC，移除 'Adjusted Close' 和 'Dividends', 'Stock Splits'
+                # prepost=False: 通常對於歷史回填，我們不需要盤前盤後數據，除非特定需求
+                data = stock.history(start=chunk_start_date_str,
+                                     end=chunk_end_date_str,
+                                     interval=interval,
+                                     auto_adjust=True,
+                                     prepost=False)
+
+                # 強化回傳值檢查
+                if data is None or data.empty:
+                    logger.warning(f"yfinance 為 {ticker} 在 {chunk_start_date_str} 到 {chunk_end_date_str} (間隔: {interval}) 返回了空的 DataFrame。")
+                    return None # 即使沒有異常，但數據為空也視為一種失敗情況
+
+                # 數據標準化
+                # --- 開始標準化 ---
+                # 步驟 1: 將索引（通常是日期時間）轉換為列
+                if isinstance(data.index, pd.DatetimeIndex):
+                    data = data.reset_index()
+
+                # 步驟 2: 將所有列名轉為小寫
+                data.columns = [col.lower() for col in data.columns]
+
+                # 步驟 3: 統一日期時間列名為 'datetime'
+                if 'date' in data.columns and 'datetime' not in data.columns:
+                    data.rename(columns={'date': 'datetime'}, inplace=True)
+                elif 'Datetime' in data.columns and 'datetime' not in data.columns:
+                     data.rename(columns={'Datetime': 'datetime'}, inplace=True)
+
+                if 'datetime' not in data.columns:
+                    logger.error(f"標準化後 DataFrame 中缺少 'datetime' 欄位。股票: {ticker}, 間隔: {interval}。可用欄位: {data.columns.tolist()}")
+                    return None
+
+                try:
+                    data['datetime'] = pd.to_datetime(data['datetime'])
+                    if data['datetime'].dt.tz is None:
+                        data['datetime'] = data['datetime'].dt.tz_localize('UTC')
+                    else:
+                        data['datetime'] = data['datetime'].dt.tz_convert('UTC')
+                except Exception as e_tz:
+                    logger.error(f"轉換 'datetime' 欄位時出錯: {e_tz}. 股票: {ticker}, 間隔: {interval}.")
+                    return None
+
+                if 'volume' not in data.columns:
+                    data['volume'] = 0
+                data['volume'] = data['volume'].fillna(0).astype('int64')
+
+                data['interval'] = interval
+                data['ticker'] = ticker
+
+                final_columns = ['datetime', 'ticker', 'interval', 'open', 'high', 'low', 'close', 'volume']
+                missing_ohlc_cols = [col for col in ['open', 'high', 'low', 'close'] if col not in data.columns]
+                if missing_ohlc_cols:
+                    logger.warning(f"DataFrame 缺少部分OHLC欄位: {missing_ohlc_cols}。股票: {ticker}, 間隔: {interval}。將嘗試填充為0。")
+                    for col in missing_ohlc_cols:
+                        data[col] = 0.0
+
+                try:
+                    data = data[final_columns]
+                except KeyError as e_cols:
+                    logger.error(f"選取最終欄位時發生 KeyError: {e_cols}。股票: {ticker}, 間隔: {interval}。可用欄位: {data.columns.tolist()}")
+                    return None
+
+                logger.info(f"成功獲取並標準化 {len(data)} 筆數據 for {ticker} ({interval}, {chunk_start_date_str}-{chunk_end_date_str}).")
+                return data
+
+            except requests.exceptions.HTTPError as http_err:
+                # 檢查是否為 429 或 5xx 錯誤
+                if http_err.response is not None and (http_err.response.status_code == 429 or http_err.response.status_code >= 500):
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(f"請求 {ticker} ({interval}) 發生 HTTP 錯誤 {http_err.response.status_code}。將在 {delay} 秒後重試 (嘗試 {attempt + 1}/{max_retries})...")
+                        time.sleep(delay)
+                    else:
+                        logger.error(f"請求 {ticker} ({interval}) 發生 HTTP 錯誤 {http_err.response.status_code}，已達最大重試次數 {max_retries}。錯誤: {http_err}")
+                        return None # 重試耗盡後返回 None
                 else:
-                    data['datetime'] = data['datetime'].dt.tz_convert('UTC')
+                    # 其他 HTTP 錯誤，不重試
+                    logger.error(f"請求 {ticker} ({interval}) 發生非預期的 HTTP 錯誤: {http_err}")
+                    return None
             except Exception as e:
-                print(f"錯誤: fetch_single_chunk: 轉換 'datetime' 欄位時出錯: {e}. 股票: {ticker}, 間隔: {interval}.")
-                return None
+                # 捕獲其他可能的 yfinance 內部錯誤或網絡問題
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"抓取或處理 {ticker} ({interval}) 失敗: {type(e).__name__} - {e}。將在 {delay} 秒後重試 (嘗試 {attempt + 1}/{max_retries})...")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"抓取或處理 {ticker} ({interval}) 失敗，已達最大重試次數 {max_retries}: {type(e).__name__} - {e}")
+                    return None # 重試耗盡後返回 None
 
-            # 步驟 6: 處理 'volume' 欄位
-            if 'volume' not in data.columns:
-                data['volume'] = 0 # 如果沒有 volume 欄位，則填充為 0
-            data['volume'] = data['volume'].fillna(0).astype('int64')
+        # 如果循環完成仍未成功 (理論上應該在循環內返回)
+        logger.error(f"fetch_single_chunk 未能為 {ticker} ({interval}) 獲取數據，即使經過重試。")
+        return None
 
-            # 步驟 7: 添加 'interval' 和 'ticker' 資訊欄位
-            data['interval'] = interval
-            data['ticker'] = ticker
-
-            # 步驟 8: 選擇並排序最終需要的欄位 (與 DBManager 期望的順序和名稱一致)
-            # DBManager 期望的欄位: ['datetime', 'ticker', 'interval', 'open', 'high', 'low', 'close', 'volume']
-            final_columns = ['datetime', 'ticker', 'interval', 'open', 'high', 'low', 'close', 'volume']
-            missing_ohlc_cols = [col for col in ['open', 'high', 'low', 'close'] if col not in data.columns]
-            if missing_ohlc_cols:
-                print(f"警告: fetch_single_chunk: DataFrame 缺少部分OHLC欄位: {missing_ohlc_cols}。股票: {ticker}, 間隔: {interval}。將嘗試填充為0。")
-                for col in missing_ohlc_cols:
-                    data[col] = 0.0 # 或 np.nan，但 DBManager 可能期望 float
-
-            try:
-                data = data[final_columns]
-            except KeyError as e:
-                print(f"錯誤: fetch_single_chunk: 選取最終欄位時發生 KeyError: {e}。股票: {ticker}, 間隔: {interval}。可用欄位: {data.columns.tolist()}")
-                return None
-
-            print(f"INFO: fetch_single_chunk: 成功獲取並標準化 {len(data)} 筆數據。")
-            return data
-
-        except Exception as e:
-            # 捕獲更廣泛的異常，包括可能的 yfinance 內部錯誤或網絡問題
-            print(f"錯誤: fetch_single_chunk: 抓取或處理 {ticker} ({interval}, {chunk_start_date_str}-{chunk_end_date_str}) 失敗: {type(e).__name__} - {e}")
-            return None
-
-    def hydrate_data_range(self, ticker: str, start_date_str: str, end_date_str: str) -> tuple[pd.DataFrame | None, dict]:
+    def hydrate_data_range(self, ticker: str, start_date_str: str, end_date_str: str, asset_class: str = 'stock') -> tuple[pd.DataFrame | None, dict]:
         """
-        核心方法：全自動回填指定股票在給定時間範圍內的歷史數據。
+        核心方法：全自動回填指定金融資產在給定時間範圍內的歷史數據。
         它會從最精細的顆粒度開始嘗試，使用時間分塊和迭代降級策略。
 
         Args:
-            ticker (str): 股票代碼。
+            ticker (str): 金融資產代碼。
             start_date_str (str): 開始日期 (YYYY-MM-DD)。
             end_date_str (str): 結束日期 (YYYY-MM-DD)。
+            asset_class (str, optional): 資產類別 ('stock', 'future', 'crypto', etc.)。預設為 'stock'。
+                                         目前此參數主要用於日誌記錄和未來擴展，尚未影響核心抓取邏輯。
 
         Returns:
             pd.DataFrame | None: 一個包含所有成功抓取數據的、合併後的 DataFrame，
                                  並帶有 'interval' 和 'ticker' 欄位。若完全失敗則返回 None。
+            dict: 包含詳細執行過程的日誌。
         """
-        print(f"===== 開始數據回填任務: Ticker={ticker}, Range=[{start_date_str} to {end_date_str}] =====")
+        logger.info(f"===== 開始數據回填任務: Ticker={ticker}, AssetClass={asset_class}, Range=[{start_date_str} to {end_date_str}] =====")
 
         execution_log = {} # 初始化執行日誌
         # 生成請求日期範圍內的所有日期字串，用於日誌記錄
@@ -423,6 +445,44 @@ class YFinanceClient:
                     "message": f"All intervals failed for {date_str_in_range}."
                 }
         return None, execution_log
+
+    def get_futures_data(self, futures_id: str, start_date: str, end_date: str) -> tuple[pd.DataFrame | None, dict]:
+        """
+        擷取指定期貨在給定時間範圍內的歷史數據。
+
+        Args:
+            futures_id (str): 期貨代碼。
+            start_date (str): 開始日期 (YYYY-MM-DD)。
+            end_date (str): 結束日期 (YYYY-MM-DD)。
+
+        Returns:
+            pd.DataFrame | None: 包含期貨數據的 DataFrame，若失敗則返回 None。
+            dict: 執行日誌。
+        """
+        logger.info(f"請求期貨數據: ID={futures_id}, Range=[{start_date} to {end_date}]")
+        return self.hydrate_data_range(ticker=futures_id,
+                                       start_date_str=start_date,
+                                       end_date_str=end_date,
+                                       asset_class='future')
+
+    def get_crypto_data(self, crypto_id: str, start_date: str, end_date: str) -> tuple[pd.DataFrame | None, dict]:
+        """
+        擷取指定加密貨幣在給定時間範圍內的歷史數據。
+
+        Args:
+            crypto_id (str): 加密貨幣代碼 (例如 'BTC-USD')。
+            start_date (str): 開始日期 (YYYY-MM-DD)。
+            end_date (str): 結束日期 (YYYY-MM-DD)。
+
+        Returns:
+            pd.DataFrame | None: 包含加密貨幣數據的 DataFrame，若失敗則返回 None。
+            dict: 執行日誌。
+        """
+        logger.info(f"請求加密貨幣數據: ID={crypto_id}, Range=[{start_date} to {end_date}]")
+        return self.hydrate_data_range(ticker=crypto_id,
+                                       start_date_str=start_date,
+                                       end_date_str=end_date,
+                                       asset_class='crypto')
 
 if __name__ == '__main__':
     print("--- YFinanceClient (Daily Market Analyzer) 測試 ---")
