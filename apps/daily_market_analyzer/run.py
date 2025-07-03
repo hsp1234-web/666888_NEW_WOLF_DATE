@@ -71,8 +71,8 @@ def main():
         # TODO: 添加 file_processor 邏輯
 
     # 初始化組件
-    yf_client = YFinanceClient()
-    db_manager = DBManager(db_path=args.db_path)
+    db_manager = DBManager(db_path=args.db_path) # 先初始化 db_manager
+    yf_client = YFinanceClient(db_manager=db_manager) # 將 db_manager 傳遞給 YFinanceClient
     analysis_engine = AnalysisEngine(db_manager_instance=db_manager) # 傳遞 db_manager 實例
 
     # 確保資料表存在 (使用 DBManager 的方法)
