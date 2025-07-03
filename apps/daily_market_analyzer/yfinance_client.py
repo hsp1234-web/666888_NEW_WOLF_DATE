@@ -47,12 +47,13 @@ def _convert_missing_dates_to_ranges(missing_dates: list[str]) -> list[tuple[str
     return ranges
 
 class YFinanceClient:
-    def __init__(self, db_manager: DBManager, cache_dir="data_workspace/cache/yfinance_hydrator"):
+    def __init__(self, db_manager: DBManager, cache_db_path: str):
         self.db_manager = db_manager
-        self.cache_dir = cache_dir
-        os.makedirs(self.cache_dir, exist_ok=True)
+        self.cache_db_path = cache_db_path # 新增快取路徑屬性
+        # os.makedirs(self.cache_dir, exist_ok=True) # 假設 cache_db_path 的目錄由 DBManager 或其他機制處理
         self.FALLBACK_INTERVALS = ['1m', '5m', '15m', '30m', '1h', '1d', '1wk', '1mo']
-        print(f"INFO: YFinanceClient (Data Hydrator v2) 初始化完畢，使用 DBManager 進行快取。Fallback intervals: {self.FALLBACK_INTERVALS}")
+        # 更新日誌訊息以包含主DB和快取DB的路徑
+        print(f"INFO: YFinanceClient (Data Hydrator v2.1) 初始化完畢，主DB: {db_manager.db_path}, 快取DB: {cache_db_path}")
 
     def _get_chunk_size_for_interval(self, interval: str) -> int:
         if interval == '1m': return 6
@@ -150,9 +151,10 @@ class YFinanceClient:
             if chunk_size_days <= 0: continue
 
             print(f"INFO: hydrate_data_range: Ticker={ticker}, Interval={interval}. 檢查資料庫快取...")
+            # --- 修改後 (check_cache 呼叫，明確指向快取DB) ---
             cached_df, missing_dates_list = self.db_manager.check_cache(
                 ticker=ticker, start_date_str=start_date_str, end_date_str=end_date_str,
-                interval=interval, table_name=db_table_name
+                interval=interval, table_name=db_table_name, target_db_path=self.cache_db_path # <== 關鍵新增
             )
 
             if force_refresh:
@@ -275,8 +277,9 @@ class YFinanceClient:
                 if current_missing_range_all_chunks_dfs:
                     single_missing_range_df = pd.concat(current_missing_range_all_chunks_dfs, ignore_index=True)
                     if not single_missing_range_df.empty:
-                        print(f"INFO: hydrate_data_range: Ticker={ticker}, Interval={interval}. Storing {len(single_missing_range_df)} newly fetched rows for range [{range_start_str}-{range_end_str}] to DB.")
-                        self.db_manager.upsert_data(single_missing_range_df, table_name=db_table_name)
+                        print(f"INFO: hydrate_data_range: Ticker={ticker}, Interval={interval}. 儲存 {len(single_missing_range_df)} 筆新獲取的數據 (範圍 [{range_start_str}-{range_end_str}]) 至快取資料庫。") # 中文化更新
+                        # --- 修改後 (upsert_data 呼叫，明確寫入快取DB) ---
+                        self.db_manager.upsert_data(single_missing_range_df, table_name=db_table_name, target_db_path=self.cache_db_path) # <== 關鍵新增
                         newly_fetched_data_all_ranges_dfs.append(single_missing_range_df)
                 elif current_missing_range_fetch_ok and not current_missing_range_all_chunks_dfs :
                      print(f"INFO: hydrate_data_range: Ticker={ticker}, Interval={interval}. Missing range [{range_start_str}-{range_end_str}] 所有區塊均未返回數據。")

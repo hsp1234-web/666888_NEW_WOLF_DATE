@@ -29,7 +29,7 @@ class DBManager:
             print(f"INFO: 已建立資料庫目錄: {db_dir}")
         print(f"INFO: DBManager (Daily Market Analyzer) 初始化完畢，資料庫路徑: {self.db_path}")
 
-    def create_ohlcv_table(self, table_name: str = "market_ohlcv_analyzer"):
+    def create_ohlcv_table(self, table_name: str, target_db_path: str | None = None): # 移除硬編碼，增加可選路徑
         """
         建立市場 OHLCV（開高低收量）數據表，如果該表尚不存在。
         包含 'interval' 和 'ticker' 欄位。
@@ -48,15 +48,16 @@ class DBManager:
             PRIMARY KEY (ticker, datetime, interval)
         );
         """
+        db_to_use = target_db_path if target_db_path else self.db_path
         try:
-            with duckdb.connect(self.db_path) as con:
+            with duckdb.connect(db_to_use) as con: # <== 使用正確的DB路徑
                 con.execute(create_sql)
-            print(f"INFO: 資料表 '{table_name}' 已在資料庫 '{self.db_path}' 中準備就緒 (包含 interval 欄位)。")
+            print(f"INFO: 資料表 '{table_name}' 已在資料庫 '{db_to_use}' 中準備就緒。") # 更新日誌訊息
         except Exception as e:
-            print(f"錯誤: 建立資料表 '{table_name}' 失敗: {e}")
+            print(f"錯誤: 建立資料表 '{table_name}' 於資料庫 '{db_to_use}' 失敗: {e}") # 更新日誌訊息
             raise
 
-    def upsert_data(self, df: pd.DataFrame, table_name: str):
+    def upsert_data(self, df: pd.DataFrame, table_name: str, target_db_path: str | None = None): # 增加可選路徑
         """
         使用 DuckDB 的 `INSERT OR REPLACE INTO` 功能高效地將 DataFrame 數據寫入指定資料表。
         此版本預期 DataFrame 已包含 'ticker' 和 'interval' 欄位。
@@ -114,8 +115,9 @@ class DBManager:
             df_to_insert.info()
             return
 
+        db_to_use = target_db_path if target_db_path else self.db_path # <== 新增：決定使用哪個DB路徑
         try:
-            with duckdb.connect(self.db_path) as con:
+            with duckdb.connect(db_to_use) as con: # <== 使用正確的DB路徑
                 con.register('df_view_to_insert', df_to_insert)
                 columns_str = ", ".join(required_cols)
                 upsert_sql = f"INSERT OR REPLACE INTO {table_name} ({columns_str}) SELECT {columns_str} FROM df_view_to_insert"
@@ -124,10 +126,10 @@ class DBManager:
 
             current_ticker = df_to_insert['ticker'].iloc[0]
             current_interval = df_to_insert['interval'].iloc[0]
-            print(f"INFO: 成功將 {len(df_to_insert)} 筆來自 '{current_ticker}' (顆粒度: {current_interval}) 的數據寫入/更新至資料表 '{table_name}'。")
+            print(f"INFO: 成功將 {len(df_to_insert)} 筆來自 '{current_ticker}' (顆粒度: {current_interval}) 的數據寫入/更新至資料庫 '{db_to_use}' 的資料表 '{table_name}'。") # 更新日誌
         except Exception as e:
             current_ticker_for_error = df_to_insert['ticker'].iloc[0] if 'ticker' in df_to_insert.columns and not df_to_insert.empty else "未知 Ticker"
-            print(f"錯誤: 寫入數據到資料表 '{table_name}' 失敗 (Ticker: {current_ticker_for_error}): {e}")
+            print(f"錯誤: 寫入數據到資料庫 '{db_to_use}' 的資料表 '{table_name}' 失敗 (Ticker: {current_ticker_for_error}): {e}") # 更新日誌
             print(f"DEBUG: 嘗試寫入的 DataFrame ({current_ticker_for_error}) info:")
             df_to_insert.info()
 
@@ -174,7 +176,7 @@ class DBManager:
             print(f"錯誤: 查詢 {ticker} 在 {current_date_str} 之前的收盤價失敗: {e}")
             return None
 
-    def check_cache(self, ticker: str, start_date_str: str, end_date_str: str, interval: str, table_name: str = "market_ohlcv_analyzer") -> tuple[pd.DataFrame, list[str]]:
+    def check_cache(self, ticker: str, start_date_str: str, end_date_str: str, interval: str, table_name: str, target_db_path: str | None = None) -> tuple[pd.DataFrame, list[str]]: # 移除硬編碼，增加可選路徑
         """
         檢查快取中指定 ticker、日期範圍和 interval 的數據。
         Args:
@@ -213,8 +215,9 @@ class DBManager:
           AND datetime < CAST(? AS TIMESTAMPTZ)
         ORDER BY datetime ASC
         """
+        db_to_use = target_db_path if target_db_path else self.db_path # <== 新增：決定使用哪個DB路徑
         try:
-            with duckdb.connect(self.db_path) as con:
+            with duckdb.connect(db_to_use) as con: # <== 使用正確的DB路徑
                 result_df = con.execute(query, [ticker, interval, query_start_ts, query_end_ts]).fetchdf()
             if not result_df.empty and 'datetime' in result_df.columns:
                 result_df['datetime'] = pd.to_datetime(result_df['datetime'])
@@ -235,7 +238,7 @@ class DBManager:
             print(f"錯誤 (check_cache): 查詢快取數據失敗 for {ticker} ({interval}): {e}")
             missing_dates = sorted(list(requested_dates_set))
             cached_df = pd.DataFrame()
-        print(f"INFO: check_cache: For {ticker} ({interval}), found {len(cached_df)} cached rows. Missing {len(missing_dates)} dates: {missing_dates[:5]}{'...' if len(missing_dates) > 5 else ''}")
+        print(f"INFO: check_cache: 對於 {ticker} (顆粒度: {interval}), 在資料庫 '{db_to_use}' 中找到 {len(cached_df)} 筆快取記錄。缺失 {len(missing_dates)} 個日期: {missing_dates[:5]}{'...' if len(missing_dates) > 5 else ''}") # 中文化更新
         return cached_df, missing_dates
 
 if __name__ == '__main__':

@@ -11,6 +11,8 @@ import sys
 import os
 from datetime import datetime
 import pandas as pd
+import concurrent.futures # <== 新增導入
+from tqdm import tqdm # <== 新增導入
 
 # 設定專案路徑，確保可以正確匯入其他模組
 def setup_project_path():
@@ -53,6 +55,8 @@ def main():
                         help="DuckDB 快取資料庫的最終存檔路徑。") # 新增 cache-db-path 參數
     parser.add_argument("--table-name", default="market_ohlcv_data",
                         help="資料庫中儲存 OHLCV 數據的表格名稱。") # 中文化 help
+     parser.add_argument("--force-refresh", action="store_true",
+                        help="若指定，則強制重新獲取所有數據，忽略快取。") # 新增 force-refresh 參數
     parser.add_argument("--process-uploads", action="store_true",
                         help="若指定，則處理 'uploads' 資料夾 (此功能待實現)。") # 中文化 help
 
@@ -71,56 +75,108 @@ def main():
         # TODO: 添加 file_processor 邏輯
 
     # 初始化組件
-    db_manager = DBManager(db_path=args.db_path) # 先初始化 db_manager
-    yf_client = YFinanceClient(db_manager=db_manager) # 將 db_manager 傳遞給 YFinanceClient
-    analysis_engine = AnalysisEngine(db_manager_instance=db_manager) # 傳遞 db_manager 實例
+    # 主進程保留 DBManager 和 AnalysisEngine 實例，用於後續的統一寫入和報告生成。
+    # YFinanceClient 的實例化移至 process_single_ticker 函數內部，以便在各個進程中獨立運作。
+    db_manager = DBManager(db_path=args.db_path)
+    analysis_engine = AnalysisEngine(db_manager_instance=db_manager)
 
-    # 確保資料表存在 (使用 DBManager 的方法)
-    db_manager.create_ohlcv_table(table_name=args.table_name)
+    # 確保主資料庫和快取資料庫的資料表結構都已建立
+    # 快取資料庫的表格由 process_single_ticker 內的 YFinanceClient -> DBManager 鏈路確保
+    # 主資料庫的表格在此處確保
+    db_manager.create_ohlcv_table(table_name=args.table_name, target_db_path=args.db_path)
+    # 為了確保 process_single_ticker 中的 YFClient->DBManager 可以寫入快取，快取DB的表也需要提前建立
+    # 或者讓 process_single_ticker 內的 DBManager 自己去 create_table_if_not_exists
+    # 這裡選擇在主進程統一建立，確保一致性
+    if args.cache_db_path: # 僅當提供了 cache_db_path 時才嘗試建立快取表
+         db_manager.create_ohlcv_table(table_name=args.table_name, target_db_path=args.cache_db_path)
+    else:
+        print("警告: 未提供 --cache-db-path，快取功能將受限或無法運作。")
+
 
     tickers_list = [ticker.strip().upper() for ticker in args.tickers.split(',')]
-
     overall_execution_log = {} # 用於聚合所有 tickers 的執行日誌
+    all_hydrated_dfs = []      # 用於收集所有成功回填的 DataFrame
 
-    for ticker in tickers_list:
-        print(f"\n--- 開始處理標的: {ticker} ---") # 中文化
-        # hydrate_data_range 現在返回 (DataFrame | None, dict_execution_log)
-        hydrated_df, ticker_execution_log = yf_client.hydrate_data_range(ticker, args.start_date, args.end_date)
+    # --- 使用 ProcessPoolExecutor 進行平行處理 ---
+    # 決定最大工作進程數，可以基於 CPU 核心數，例如 os.cpu_count()
+    # 為避免過度消耗資源，可以設定一個合理的上限
+    max_workers = min(os.cpu_count() or 1, len(tickers_list)) # 確保至少有1個worker，且不超過tickers數量
+    print(f"INFO: 啟動聯合作戰模式，使用最多 {max_workers} 個進程處理 {len(tickers_list)} 個標的。")
 
-        # 合併 ticker 的執行日誌到總日誌中
-        for date_key, ticker_daily_log_value in ticker_execution_log.items():
-            if date_key not in overall_execution_log:
-                overall_execution_log[date_key] = {}
-            overall_execution_log[date_key].update(ticker_daily_log_value) # ticker_daily_log_value 應為 {ticker: log_info}
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # 準備提交給進程池的任務
+        # future_to_ticker 映射，用於在任務完成時識別對應的 ticker
+        future_to_ticker = {
+            executor.submit(
+                process_single_ticker,
+                ticker, args.start_date, args.end_date, args.db_path, args.cache_db_path, args.table_name, args.force_refresh
+            ): ticker for ticker in tickers_list
+        }
 
-        if hydrated_df is not None and not hydrated_df.empty:
-            print(f"資訊：標的 {ticker} 成功擷取 {len(hydrated_df)} 筆數據。準備寫入資料庫...") # 中文化
+        # 使用 tqdm 顯示進度
+        # concurrent.futures.as_completed 會在任何 future 完成時 yield 它
+        for future in tqdm(concurrent.futures.as_completed(future_to_ticker), total=len(tickers_list), desc="聯合作戰引擎執行中"):
+            ticker = future_to_ticker[future]
             try:
-                db_manager.upsert_data(hydrated_df, table_name=args.table_name)
-                print(f"資訊：標的 {ticker} 數據成功寫入資料庫。") # 中文化
-            except Exception as e:
-                print(f"錯誤：標的 {ticker} 數據寫入資料庫失敗: {e}") # 中文化
-                # 更新 overall_execution_log 中對應日期的狀態為 db_error
-                for date_str_key in pd.date_range(args.start_date, args.end_date).strftime('%Y-%m-%d'):
-                    if date_str_key in overall_execution_log and ticker in overall_execution_log[date_str_key]:
-                         overall_execution_log[date_str_key][ticker]['status'] = 'db_upsert_failed'
-                         # 確保 message 是字串且可附加
-                         base_message = overall_execution_log[date_str_key][ticker].get('message', "")
-                         if not isinstance(base_message, str): base_message = str(base_message)
-                         overall_execution_log[date_str_key][ticker]['message'] = base_message + f" 資料庫更新失敗: {str(e)}" # 中文化
-        else:
-            print(f"資訊：標的 {ticker} 未擷取到任何數據 (詳見 yfinance_client 日誌)。") # 中文化
-            # overall_execution_log 應已由 yfinance_client 更新了此 ticker 的失敗狀態
+                # 獲取單個任務的結果 (hydrated_df, ticker_execution_log)
+                hydrated_df_single, ticker_execution_log_single = future.result()
 
-        print(f"--- 標的: {ticker} 處理完畢 ---") # 中文化
+                # 合併日誌
+                if ticker_execution_log_single: # 確保日誌不是 None
+                    for date_key, log_val_per_day in ticker_execution_log_single.items():
+                        if date_key not in overall_execution_log:
+                            overall_execution_log[date_key] = {}
+                        # log_val_per_day 應該是 {ticker_name: daily_log_detail}
+                        # 如果 process_single_ticker 返回的 execution_log 結構與原先不同，這裡需要調整
+                        # 假設 execution_log 結構是 {date_str: {ticker_str: log_details}}
+                        overall_execution_log[date_key].update(log_val_per_day)
+
+
+                if hydrated_df_single is not None and not hydrated_df_single.empty:
+                    all_hydrated_dfs.append(hydrated_df_single)
+                elif hydrated_df_single is None:
+                    print(f"資訊：標的 {ticker} 的平行處理任務未返回有效的 DataFrame。")
+
+
+            except Exception as exc:
+                print(f"錯誤：處理標的 {ticker} 的平行任務時發生例外: {exc}")
+                # 可以在此處記錄整個 Ticker 的處理失敗日誌到 overall_execution_log
+                # 例如，為該 ticker 在請求日期範圍內的所有日期標記錯誤
+                for date_str_in_range in pd.date_range(args.start_date, args.end_date).strftime('%Y-%m-%d'):
+                    overall_execution_log.setdefault(date_str_in_range, {}).setdefault(ticker, {
+                        "status": "parallel_task_exception",
+                        "message": f"平行任務執行失敗: {str(exc)}",
+                        "count": 0,
+                        "interval": None
+                    })
+
+    # --- 所有平行任務完成後，在主進程中統一處理 ---
+    print("\n--- 所有平行數據回填任務完成，正在合併數據... ---")
+    if all_hydrated_dfs:
+        # 合併所有從各進程收集回來的 DataFrame
+        # 這些 DataFrame 應該是已經經過快取處理的數據 (即 yf_client.hydrate_data_range 的輸出)
+        # 它們代表的是需要在主數據庫中進行 upsert 的數據。
+        final_master_df = pd.concat(all_hydrated_dfs, ignore_index=True)
+        if not final_master_df.empty:
+            print(f"INFO: 數據合併完成，總共 {len(final_master_df)} 筆數據。準備一次性寫入主分析資料庫 '{args.db_path}'...")
+            try:
+                db_manager.upsert_data(final_master_df, table_name=args.table_name, target_db_path=args.db_path)
+                print(f"INFO: {len(final_master_df)} 筆合併數據成功寫入主分析資料庫。")
+            except Exception as e_main_upsert:
+                print(f"錯誤：將合併後的數據寫入主分析資料庫 '{args.db_path}' 失敗: {e_main_upsert}")
+                # 此處的錯誤比較嚴重，可能需要更詳細的日誌或通知
+        else:
+            print("INFO: 合併後的 DataFrame 為空，無需寫入主分析資料庫。")
+    else:
+        print("INFO: 本次執行未獲取到任何新的數據可寫入主分析資料庫。")
 
     overall_end_time = datetime.now()
     task_duration_seconds = (overall_end_time - overall_start_time).total_seconds()
-    print(f"\n--- 所有標的處理完成 ---") # 中文化
-    print(f"任務結束時間: {overall_end_time.strftime('%Y-%m-%d %H:%M:%S')}") # 簡化時間格式
-    print(f"總執行時長: {task_duration_seconds:.2f} 秒") # 中文化
+    print(f"\n--- 所有數據處理與寫入完成 ---") # 更新日誌
+    print(f"任務結束時間: {overall_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"總執行時長: {task_duration_seconds:.2f} 秒")
 
-    # 初始化報告生成器 (傳入合併後的日誌和分析引擎實例)
+    # 初始化報告生成器 (傳入合併後的日誌和主進程的分析引擎實例)
     report_gen = ReportGenerator(execution_log=overall_execution_log,
                                  analysis_engine_instance=analysis_engine)
 
@@ -180,3 +236,73 @@ if __name__ == "__main__":
     #         print(f"ERROR: Late ModuleNotFoundError in daily_market_analyzer __main__: {e}") # 中文化
 
     main()
+
+def process_single_ticker(ticker, start_date, end_date, db_path, cache_db_path, table_name, force_refresh):
+    """
+    處理單一金融標的的完整數據回填與寫入邏輯。
+    此函數將在獨立的進程中執行。
+    """
+    # 在新進程中重新初始化客戶端和管理器。
+    # 注意：若 DBManager 和 YFinanceClient 的實例化涉及複雜狀態或資源 (如資料庫連線池)，
+    # 可能需更細緻處理以確保進程安全。對 DuckDB 這類嵌入式資料庫，各進程獨立連線通常安全。
+
+    # 為了讓日誌能區分進程，加入 PID
+    pid = os.getpid()
+    print(f"--- [PID:{pid}] 開始處理標的: {ticker} ---")
+
+    # 重新初始化 DBManager 和 YFinanceClient。
+    # 需確保這些類別的初始化過程輕量，或能在多進程環境下安全獨立運行。
+    # 若共享不可序列化資源，則需調整設計（例如：透過參數傳遞資源，或使用進程安全的管理器）。
+    try:
+        # 設定專案路徑，確保在新進程中可以正確導入其他模組。
+        # 此設定通常在主模組載入時已完成，但若進程啟動方式不同，可能需重新設定。
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root_for_process = os.path.abspath(os.path.join(current_file_dir, '..', '..'))
+        if project_root_for_process not in sys.path:
+            sys.path.insert(0, project_root_for_process)
+            # print(f"DEBUG [PID:{pid}]: 為進程新增專案根目錄到 sys.path: {project_root_for_process}")
+
+        # 以下導入語句已移至檔案頂部。
+        # 在多進程環境下，子進程會繼承父進程的已導入模組，通常無需在此重新動態導入。
+        # from apps.daily_market_analyzer.db_manager import DBManager
+        # from apps.daily_market_analyzer.yfinance_client import YFinanceClient
+
+        db_manager_process = DBManager(db_path=db_path)
+        # 確保 cache_db_path 正確傳遞給 YFinanceClient
+        yf_client_process = YFinanceClient(db_manager=db_manager_process, cache_db_path=cache_db_path)
+    except Exception as e_init:
+        print(f"錯誤 [PID:{pid}]: 初始化標的 {ticker} 的處理器時發生錯誤: {e_init}")
+        return None, {start_date: {ticker: {"status": "initialization_error", "message": str(e_init), "count": 0, "interval": None}}}
+
+
+    # 執行數據回填
+    # 注意：hydrate_data_range 應設計為不依賴外部狀態 (除了傳入的參數)
+    try:
+        hydrated_df, execution_log = yf_client_process.hydrate_data_range(
+            ticker, start_date, end_date,
+            db_table_name=table_name,
+            force_refresh=force_refresh
+        )
+    except Exception as e_hydrate:
+        print(f"錯誤 [PID:{pid}]: 處理標的 {ticker} 的 hydrate_data_range 時發生錯誤: {e_hydrate}")
+        # 建立一個基本的錯誤日誌條目
+        error_log = {}
+        temp_date = datetime.strptime(start_date, "%Y-%m-%d")
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+        while temp_date <= end_date_obj:
+            date_str = temp_date.strftime("%Y-%m-%d")
+            error_log.setdefault(date_str, {}).setdefault(ticker, {
+                "status": "hydration_error",
+                "message": str(e_hydrate),
+                "count": 0,
+                "interval": None
+            })
+            temp_date += timedelta(days=1)
+        return None, error_log
+
+    # 根據作戰計畫，單一 Ticker 處理函數只負責回填快取。
+    # 主數據庫的寫入將由主進程在所有平行任務完成後統一處理。
+    # 因此，這裡不需要 upsert_data 到主數據庫。yf_client.hydrate_data_range 內部已處理快取DB的寫入。
+
+    print(f"--- [PID:{pid}] 標的: {ticker} 處理完畢 ---")
+    return hydrated_df, execution_log
