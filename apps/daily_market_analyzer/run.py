@@ -9,6 +9,7 @@
 import argparse
 import sys
 import os
+import shutil # <--- 新增導入
 from datetime import datetime
 import pandas as pd
 
@@ -64,7 +65,30 @@ def main():
 
     # 時區信息 %Z%z 可能因環境導致不同輸出，可考慮標準化為 UTC 或移除
     print(f"任務開始時間: {overall_start_time.strftime('%Y-%m-%d %H:%M:%S')}") # 簡化時間格式
-    print(f"執行參數: 標的='{args.tickers}', 起始日='{args.start_date}', 結束日='{args.end_date}', 資料庫='{args.db_path}', 資料表='{args.table_name}'") # 中文化
+
+    use_staging_dir = True
+    main_db_path_final = args.db_path  # Google Drive 上的最終路徑
+    cache_db_path_final = args.cache_db_path # Google Drive 上的最終路徑
+
+    if use_staging_dir:
+        db_directory = "/tmp/analyzer_dbs"
+        os.makedirs(db_directory, exist_ok=True)
+        print(f"資訊：使用暫存目錄: {db_directory}")
+
+        # 從 args 解析的 db_name 和 cache_db_name 通常是包含路徑的，我們需要檔名部分
+        actual_main_db_filename = os.path.basename(args.db_path)
+        actual_cache_db_filename = os.path.basename(args.cache_db_path)
+
+        current_main_db_path = os.path.join(db_directory, actual_main_db_filename)
+        current_cache_db_path = os.path.join(db_directory, actual_cache_db_filename)
+        print(f"資訊：主要資料庫將在暫存區處理: {current_main_db_path}")
+        print(f"資訊：快取資料庫將在暫存區處理: {current_cache_db_path}")
+    else:
+        current_main_db_path = main_db_path_final
+        current_cache_db_path = cache_db_path_final
+        print(f"資訊：直接使用永久儲存路徑。")
+
+    print(f"執行參數: 標的='{args.tickers}', 起始日='{args.start_date}', 結束日='{args.end_date}', 資料庫='{current_main_db_path}', 資料表='{args.table_name}'") # 中文化
 
     if args.process_uploads:
         print("資訊：--process-uploads 選項已指定，但此功能尚在開發中，將被略過。") # 中文化
@@ -72,7 +96,9 @@ def main():
 
     # 初始化組件
     # DBManager 現在需要 cache_db_path
-    db_manager = DBManager(db_path=args.db_path, cache_db_path=args.cache_db_path)
+    # db_manager = DBManager(db_path=args.db_path, cache_db_path=args.cache_db_path) # 舊邏輯
+    db_manager = DBManager(db_path=current_main_db_path, cache_db_path=current_cache_db_path)
+
 
     # YFinanceClient 現在需要 db_manager 實例
     yf_client = YFinanceClient(db_manager=db_manager)
@@ -189,6 +215,43 @@ def main():
         print(f"\n報告已成功儲存至：{report_filepath}")
     except IOError as e:
         print(f"\n錯誤：儲存報告至檔案失敗：{e}")
+
+    # --- 新增「戰果同步」邏輯 ---
+    if use_staging_dir:
+        print("\n--- 開始同步本地資料庫至永久存檔 ---")
+        files_to_sync = {
+            "主分析資料庫": {"temp": current_main_db_path, "final": main_db_path_final},
+            "快取資料庫": {"temp": current_cache_db_path, "final": cache_db_path_final}
+        }
+        sync_successful_all = True
+
+        for db_name, paths in files_to_sync.items():
+            temp_path = paths["temp"]
+            final_path = paths["final"]
+
+            if os.path.exists(temp_path):
+                try:
+                    # 確保最終目標目錄存在
+                    final_dir = os.path.dirname(final_path)
+                    if not os.path.exists(final_dir):
+                        os.makedirs(final_dir, exist_ok=True)
+                        print(f"資訊：已創建目標目錄 {final_dir}")
+
+                    shutil.copy2(temp_path, final_path)
+                    print(f"資訊：{db_name} ({temp_path}) 已成功複製到 {final_path}")
+                except Exception as e:
+                    print(f"錯誤：同步 {db_name} ({temp_path}) 至 {final_path} 失敗: {e}")
+                    sync_successful_all = False
+            else:
+                print(f"警告：暫存檔案 {temp_path} ({db_name}) 不存在，無法同步。")
+                # 根據需求，這可能也應該視為一個失敗
+                # sync_successful_all = False
+
+        if sync_successful_all:
+            print("INFO: 本地資料庫已成功同步至 Google Drive 永久存檔。")
+        else:
+            print("警告：部分或全部本地資料庫同步至 Google Drive 永久存檔失敗。")
+    # --- 「戰果同步」邏輯結束 ---
 
     print("\n--- 每日市場洞察報告引擎任務執行完畢 ---")
 
