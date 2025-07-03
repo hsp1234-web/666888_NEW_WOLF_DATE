@@ -15,21 +15,30 @@ class DBManager:
     提供方法來建立資料庫連線、建立資料表以及高效地寫入 (UPSERT) DataFrame 數據。
     此版本適用於 Daily Market Analyzer，處理包含 'interval' 欄位的數據，並提供查詢功能。
     """
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, memory_limit: str | None = None): # 新增 memory_limit 參數
         """
         初始化 DBManager。
 
         Args:
             db_path (str): DuckDB 資料庫檔案的路徑。
+            memory_limit (str | None): DuckDB 的記憶體限制設定，例如 '1GB'。
         """
         self.db_path = db_path
+        self.memory_limit = memory_limit # 儲存記憶體限制
         db_dir = os.path.dirname(self.db_path)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir, exist_ok=True)
             print(f"INFO: 已建立資料庫目錄: {db_dir}")
-        print(f"INFO: DBManager (Daily Market Analyzer) 初始化完畢，資料庫路徑: {self.db_path}")
+        print(f"INFO: DBManager (Daily Market Analyzer) 初始化完畢，資料庫路徑: {self.db_path}, 記憶體限制: {self.memory_limit or 'DuckDB 預設'}")
 
-    def create_ohlcv_table(self, table_name: str, target_db_path: str | None = None): # 移除硬編碼，增加可選路徑
+    def _get_db_connection_config(self) -> dict:
+        """ Helper to create connection config """
+        config = {}
+        if self.memory_limit:
+            config['memory_limit'] = self.memory_limit
+        return config
+
+    def create_ohlcv_table(self, table_name: str, target_db_path: str | None = None):
         """
         建立市場 OHLCV（開高低收量）數據表，如果該表尚不存在。
         包含 'interval' 和 'ticker' 欄位。
@@ -49,12 +58,13 @@ class DBManager:
         );
         """
         db_to_use = target_db_path if target_db_path else self.db_path
+        config = self._get_db_connection_config()
         try:
-            with duckdb.connect(db_to_use) as con: # <== 使用正確的DB路徑
+            with duckdb.connect(database=db_to_use, config=config if config else None) as con:
                 con.execute(create_sql)
-            print(f"INFO: 資料表 '{table_name}' 已在資料庫 '{db_to_use}' 中準備就緒。") # 更新日誌訊息
+            print(f"INFO: 資料表 '{table_name}' 已在資料庫 '{db_to_use}' 中準備就緒。")
         except Exception as e:
-            print(f"錯誤: 建立資料表 '{table_name}' 於資料庫 '{db_to_use}' 失敗: {e}") # 更新日誌訊息
+            print(f"錯誤: 建立資料表 '{table_name}' 於資料庫 '{db_to_use}' 失敗: {e}")
             raise
 
     def upsert_data(self, df: pd.DataFrame, table_name: str, target_db_path: str | None = None): # 增加可選路徑
@@ -115,9 +125,10 @@ class DBManager:
             df_to_insert.info()
             return
 
-        db_to_use = target_db_path if target_db_path else self.db_path # <== 新增：決定使用哪個DB路徑
+        db_to_use = target_db_path if target_db_path else self.db_path
+        config = self._get_db_connection_config()
         try:
-            with duckdb.connect(db_to_use) as con: # <== 使用正確的DB路徑
+            with duckdb.connect(database=db_to_use, config=config if config else None) as con:
                 con.register('df_view_to_insert', df_to_insert)
                 columns_str = ", ".join(required_cols)
                 upsert_sql = f"INSERT OR REPLACE INTO {table_name} ({columns_str}) SELECT {columns_str} FROM df_view_to_insert"
@@ -143,7 +154,10 @@ class DBManager:
             WHERE ticker = ? AND datetime >= CAST(? AS TIMESTAMPTZ) AND datetime < CAST(? AS TIMESTAMPTZ)
             ORDER BY datetime ASC
             """
-            with duckdb.connect(self.db_path) as con:
+            config = self._get_db_connection_config()
+            # self.db_path is used here as query_data_for_day is likely for the main DB.
+            # If it could target other DBs, target_db_path would need to be a parameter.
+            with duckdb.connect(database=self.db_path, config=config if config else None) as con:
                 result_df = con.execute(query, [ticker, start_of_day, start_of_next_day]).fetchdf()
 
             if not result_df.empty and 'datetime' in result_df.columns:
@@ -215,9 +229,10 @@ class DBManager:
           AND datetime < CAST(? AS TIMESTAMPTZ)
         ORDER BY datetime ASC
         """
-        db_to_use = target_db_path if target_db_path else self.db_path # <== 新增：決定使用哪個DB路徑
+        db_to_use = target_db_path if target_db_path else self.db_path
+        config = self._get_db_connection_config()
         try:
-            with duckdb.connect(db_to_use) as con: # <== 使用正確的DB路徑
+            with duckdb.connect(database=db_to_use, config=config if config else None) as con:
                 result_df = con.execute(query, [ticker, interval, query_start_ts, query_end_ts]).fetchdf()
             if not result_df.empty and 'datetime' in result_df.columns:
                 result_df['datetime'] = pd.to_datetime(result_df['datetime'])

@@ -114,84 +114,100 @@ def call_gemini_api_for_synthesis(prompt_text, api_key, model_name):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate a synthesis report from multiple weekly analysis reports.")
-    parser.add_argument("--report-filepaths", type=str, required=True, nargs='+',
-                        help="Space-separated list of paths to the weekly analysis report .txt files.")
+    parser = argparse.ArgumentParser(description="從多份每週分析報告生成綜合報告。") # 中文化
+    # 修改 --report-filepaths 參數以符合指令要求
+    parser.add_argument("--report-filepaths", type=str, required=True, nargs='+', # nargs='+' 表示允許多個值
+                        help="要進行綜合分析的報告檔案路徑列表 (以空格分隔)。") # 中文化
     parser.add_argument("--synthesis-reports-dir", type=str, default=DEFAULT_SYNTHESIS_REPORTS_DIR,
-                        help=f"Directory to save the generated synthesis report. Default: {DEFAULT_SYNTHESIS_REPORTS_DIR}")
+                        help=f"儲存生成的綜合報告的目錄。預設值: {DEFAULT_SYNTHESIS_REPORTS_DIR}") # 中文化
     parser.add_argument("--gemini-model", type=str, default=DEFAULT_GEMINI_MODEL,
-                        help=f"Gemini model to use for synthesis. Default: {DEFAULT_GEMINI_MODEL}")
+                        help=f"用於綜合分析的 Gemini 模型。預設值: {DEFAULT_GEMINI_MODEL}") # 中文化
 
     args = parser.parse_args()
 
-    logging.info(f"Starting cross-week report synthesis from {len(args.report_filepaths)} reports.")
+    logging.info(f"開始從 {len(args.report_filepaths)} 份報告進行跨週報告綜合分析。") # 中文化
 
     if not GEMINI_API_KEY:
-        logging.error("GEMINI_API_KEY environment variable not set. Cannot proceed.")
+        logging.error("未設定 GEMINI_API_KEY 環境變數。無法繼續。") # 中文化
         return
 
     concatenated_reports_content = []
     valid_reports_count = 0
+
+    # 直接使用 args.report_filepaths，因為它已經是一個列表
+    if not args.report_filepaths:
+        logging.error("錯誤：未提供任何報告檔案路徑 (--report-filepaths)。") # 中文化
+        return
+
     for report_path in args.report_filepaths:
-        # Extract week_id or some identifier from the filename if possible for better formatting
-        # e.g., "2023-W10_AnalysisReport.txt" -> "Report for Week 2023-W10"
         report_basename = os.path.basename(report_path)
-        report_identifier = os.path.splitext(report_basename)[0].replace("_AnalysisReport", "")
+        # 嘗試從檔案名提取更友好的標識符，例如移除副檔名和常見後綴
+        report_identifier = os.path.splitext(report_basename)[0]
+        report_identifier = report_identifier.replace("_AnalysisReport", "").replace("_Report", "")
 
         content = load_report_content(report_path)
         if content:
-            concatenated_reports_content.append(f"\n--- START OF REPORT: {report_identifier} ---\n")
+            concatenated_reports_content.append(f"\n--- 報告開始: {report_identifier} ({report_basename}) ---\n") # 中文化並加入原始檔名
             concatenated_reports_content.append(content)
-            concatenated_reports_content.append(f"\n--- END OF REPORT: {report_identifier} ---\n")
+            concatenated_reports_content.append(f"\n--- 報告結束: {report_identifier} ---\n") # 中文化
             valid_reports_count += 1
+        else:
+            logging.warning(f"警告：無法加載報告 '{report_path}' 或其內容為空。將在綜合分析中跳過此報告。") # 中文化
 
     if not concatenated_reports_content:
-        logging.error("No valid report content found to synthesize. Exiting.")
+        logging.error("未找到有效的報告內容進行綜合分析。正在結束。") # 中文化
         return
+
+    logging.info(f"成功加載 {valid_reports_count} 份報告進行綜合。") # 中文化
 
     full_concatenated_text = "\n".join(concatenated_reports_content)
 
-    # Prepare prompt
     prompt_fill_data = {
         "num_reports": valid_reports_count,
         "concatenated_reports": full_concatenated_text
     }
     final_prompt = CROSS_REPORT_SYNTHESIS_PROMPT_TEMPLATE.format(**prompt_fill_data)
 
-    # For debugging the potentially very long prompt
-    # debug_prompt_path = os.path.join(args.synthesis_reports_dir, "debug_synthesis_prompt.txt")
-    # os.makedirs(args.synthesis_reports_dir, exist_ok=True)
-    # with open(debug_prompt_path, 'w', encoding='utf-8') as f:
-    #    f.write(final_prompt)
-    # logging.info(f"Saved synthesis prompt for debugging to {debug_prompt_path}")
+    # 調試長提示訊息的選項 (可選)
+    # debug_prompt_dir = os.path.join(args.synthesis_reports_dir, "debug_prompts")
+    # os.makedirs(debug_prompt_dir, exist_ok=True)
+    # debug_prompt_filename = f"synthesis_prompt_{datetime.now().strftime('%Y%m%d%H%M%S')}.txt"
+    # debug_prompt_path = os.path.join(debug_prompt_dir, debug_prompt_filename)
+    # try:
+    #     with open(debug_prompt_path, 'w', encoding='utf-8') as f:
+    #        f.write(final_prompt)
+    #     logging.info(f"已將用於調試的綜合提示儲存至 {debug_prompt_path}") # 中文化
+    # except Exception as e:
+    #     logging.error(f"儲存調試提示失敗: {e}")
+
 
     synthesis_report_content = call_gemini_api_for_synthesis(final_prompt, GEMINI_API_KEY, args.gemini_model)
 
-    # Save the synthesis report
     os.makedirs(args.synthesis_reports_dir, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-    synthesis_filename = f"CrossWeekSynthesis_{timestamp}.txt"
+    # 檔案名可以包含報告數量信息
+    synthesis_filename = f"CrossReportSynthesis_{valid_reports_count}files_{timestamp}.md" # 改為 .md 格式
     synthesis_filepath = os.path.join(args.synthesis_reports_dir, synthesis_filename)
 
     try:
         with open(synthesis_filepath, 'w', encoding='utf-8') as f:
             f.write(synthesis_report_content)
-        logging.info(f"Successfully saved cross-week synthesis report to: {synthesis_filepath}")
+        logging.info(f"已成功將跨週綜合報告儲存至：{synthesis_filepath}") # 中文化
     except Exception as e:
-        logging.error(f"Error saving synthesis report to {synthesis_filepath}: {e}")
+        logging.error(f"儲存綜合報告至 {synthesis_filepath} 時發生錯誤：{e}") # 中文化
 
-    logging.info("Cross-week report synthesis finished.")
+    logging.info("跨週報告綜合分析完成。") # 中文化
 
 
 if __name__ == "__main__":
-    # Example:
+    # 示例命令:
     # python apps/20_generate_synthesis_report/run.py \
-    #   --report-filepaths data/gold/analysis_reports/2023-W10_AnalysisReport.txt data/gold/analysis_reports/2023-W11_AnalysisReport.txt \
-    #   --synthesis-reports-dir data/reports
-    # (Ensure GEMINI_API_KEY is set)
+    #   --report-filepaths data_workspace/reports/market_analysis_FULL_AAPL_2024-07-01_to_2024-07-02_20240715103000.md data_workspace/reports/market_analysis_FULL_MSFT_2024-07-01_to_2024-07-02_20240715103500.md \
+    #   --synthesis-reports-dir data_workspace/synthesis_reports
+    # (確保 GEMINI_API_KEY 已設定)
     if not genai:
-        print("google.generativeai library is not installed.")
+        print("錯誤：未安裝 google.generativeai 套件。請執行 'pip install google-generativeai'") # 中文化
     elif not GEMINI_API_KEY:
-        print("GEMINI_API_KEY environment variable is not set.")
+        print("錯誤：未設定 GEMINI_API_KEY 環境變數。") # 中文化
     else:
         main()
