@@ -27,7 +27,10 @@ def create_sample_df(dates: list[str], ticker="TEST", interval="1d", data_prefix
 class TestYFinanceClient(unittest.TestCase):
     def setUp(self):
         self.mock_db_manager = MagicMock(spec=DBManager)
-        self.client = YFinanceClient(db_manager=self.mock_db_manager, cache_dir="temp_test_cache")
+        # --- 為 mock_db_manager 設定 db_path 屬性 ---
+        self.mock_db_manager.db_path = "mock_main.duckdb"
+        # --- 修改 YFinanceClient 初始化參數 ---
+        self.client = YFinanceClient(db_manager=self.mock_db_manager, cache_db_path="temp_test_cache/test_cache.duckdb")
         self.ticker = "TEST_TICKER"
         self.table_name = "test_ohlcv"
 
@@ -53,7 +56,7 @@ class TestYFinanceClient(unittest.TestCase):
         result_df, exec_log = self.client.hydrate_data_range(self.ticker, start_date_str, end_date_str, db_table_name=self.table_name)
         self.mock_db_manager.check_cache.assert_called_once_with(
             ticker=self.ticker, start_date_str=start_date_str, end_date_str=end_date_str,
-            interval=hit_interval, table_name=self.table_name)
+            interval=hit_interval, table_name=self.table_name, target_db_path=self.client.cache_db_path) # <-- 新增 target_db_path
         mock_fetch_single_chunk.assert_not_called()
         self.mock_db_manager.upsert_data.assert_not_called()
         pd.testing.assert_frame_equal(result_df, sample_cached_data, check_dtype=False)
@@ -82,8 +85,8 @@ class TestYFinanceClient(unittest.TestCase):
         result_df, exec_log = self.client.hydrate_data_range(self.ticker, start_date_str, end_date_str, db_table_name=self.table_name)
 
         self.assertEqual(self.mock_db_manager.check_cache.call_count, 2)
-        self.mock_db_manager.check_cache.assert_any_call(ticker=self.ticker, start_date_str=start_date_str, end_date_str=end_date_str, interval=skipped_interval, table_name=self.table_name)
-        self.mock_db_manager.check_cache.assert_any_call(ticker=self.ticker, start_date_str=start_date_str, end_date_str=end_date_str, interval=fetch_interval, table_name=self.table_name)
+        self.mock_db_manager.check_cache.assert_any_call(ticker=self.ticker, start_date_str=start_date_str, end_date_str=end_date_str, interval=skipped_interval, table_name=self.table_name, target_db_path=self.client.cache_db_path) # <-- 新增 target_db_path
+        self.mock_db_manager.check_cache.assert_any_call(ticker=self.ticker, start_date_str=start_date_str, end_date_str=end_date_str, interval=fetch_interval, table_name=self.table_name, target_db_path=self.client.cache_db_path) # <-- 新增 target_db_path
 
         expected_yfinance_end = (real_datetime.strptime(end_date_str, "%Y-%m-%d") + real_timedelta(days=1)).strftime("%Y-%m-%d")
         mock_fetch_single_chunk.assert_called_once_with(self.ticker, start_date_str, expected_yfinance_end, fetch_interval)
@@ -118,9 +121,17 @@ class TestYFinanceClient(unittest.TestCase):
         result_df, exec_log = self.client.hydrate_data_range(self.ticker, start_date_str, end_date_str, db_table_name=self.table_name)
 
         self.assertEqual(self.mock_db_manager.check_cache.call_count, 2)
+        # Check specific calls to check_cache with target_db_path
+        self.mock_db_manager.check_cache.assert_any_call(ticker=self.ticker, start_date_str=start_date_str, end_date_str=end_date_str, interval=skipped_interval, table_name=self.table_name, target_db_path=self.client.cache_db_path)
+        self.mock_db_manager.check_cache.assert_any_call(ticker=self.ticker, start_date_str=start_date_str, end_date_str=end_date_str, interval=fetch_interval, table_name=self.table_name, target_db_path=self.client.cache_db_path)
+
         expected_yfinance_end = (real_datetime.strptime(end_date_str, "%Y-%m-%d") + real_timedelta(days=1)).strftime("%Y-%m-%d")
         mock_fetch_single_chunk.assert_called_once_with(self.ticker, mid_date_str, expected_yfinance_end, fetch_interval)
+
+        # Check upsert_data call with target_db_path
         self.mock_db_manager.upsert_data.assert_called_once()
+        args_upsert, kwargs_upsert = self.mock_db_manager.upsert_data.call_args
+        self.assertEqual(kwargs_upsert.get('target_db_path'), self.client.cache_db_path)
 
         expected_df = pd.concat([cached_day1_5m, api_missing_data], ignore_index=True).sort_values(by=['datetime']).reset_index(drop=True)
         result_df = result_df.sort_values(by=['datetime']).reset_index(drop=True)
@@ -150,13 +161,25 @@ class TestYFinanceClient(unittest.TestCase):
         result_df, exec_log = self.client.hydrate_data_range(self.ticker, start_date_str, end_date_str, db_table_name=self.table_name)
 
         self.assertEqual(self.mock_db_manager.check_cache.call_count, 3)
+        # Check specific calls to check_cache with target_db_path
+        self.mock_db_manager.check_cache.assert_any_call(ticker=self.ticker, start_date_str=start_date_str, end_date_str=end_date_str, interval=int_1m, table_name=self.table_name, target_db_path=self.client.cache_db_path)
+        self.mock_db_manager.check_cache.assert_any_call(ticker=self.ticker, start_date_str=start_date_str, end_date_str=end_date_str, interval=int_5m, table_name=self.table_name, target_db_path=self.client.cache_db_path)
+        self.mock_db_manager.check_cache.assert_any_call(ticker=self.ticker, start_date_str=start_date_str, end_date_str=end_date_str, interval=int_15m, table_name=self.table_name, target_db_path=self.client.cache_db_path)
+
         yfinance_exclusive_end = (real_datetime.strptime(end_date_str, "%Y-%m-%d") + real_timedelta(days=1)).strftime("%Y-%m-%d")
         expected_fetch_calls = [
-            call(self.ticker, start_date_str, yfinance_exclusive_end, int_5m),
+            call(self.ticker, start_date_str, yfinance_exclusive_end, int_5m), # API fetch for 1m is skipped due to date range
             call(self.ticker, start_date_str, yfinance_exclusive_end, int_15m)]
         mock_fetch_single_chunk.assert_has_calls(expected_fetch_calls)
-        self.assertEqual(mock_fetch_single_chunk.call_count, 2)
+        self.assertEqual(mock_fetch_single_chunk.call_count, 2) # 1m is skipped, 5m fails, 15m succeeds
+
+        # Check upsert_data call with target_db_path
         self.mock_db_manager.upsert_data.assert_called_once()
+        args_upsert, kwargs_upsert = self.mock_db_manager.upsert_data.call_args
+        pd.testing.assert_frame_equal(args_upsert[0], api_data_15m, check_dtype=False) # Check the df being upserted
+        self.assertEqual(kwargs_upsert.get('table_name'), self.table_name)
+        self.assertEqual(kwargs_upsert.get('target_db_path'), self.client.cache_db_path)
+
         pd.testing.assert_frame_equal(result_df, api_data_15m, check_dtype=False)
         self.assertEqual(exec_log[start_date_str][self.ticker]['status'], "success")
         self.assertEqual(exec_log[start_date_str][self.ticker]['interval'], int_15m)

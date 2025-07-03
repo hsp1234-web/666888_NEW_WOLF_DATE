@@ -41,7 +41,7 @@ except ModuleNotFoundError as e:
     #     print("DEBUG: 'apps/' or 'apps/daily_market_analyzer/' directory not found from current working directory.")
     raise
 
-# --- 修改函數簽名 ---
+# --- process_single_ticker 函數定義移至 main 函數之前 ---
 def process_single_ticker(ticker, start_date, end_date, db_path, cache_db_path, table_name, force_refresh, verbose_mode):
     """
     處理單一金融標的的完整數據回填與寫入邏輯。
@@ -195,12 +195,13 @@ def main():
     all_hydrated_dfs = []      # 用於收集所有成功回填的 DataFrame
 
     # --- 使用 ProcessPoolExecutor 進行平行處理 ---
-    # 決定最大工作進程數，可以基於 CPU 核心數，例如 os.cpu_count()
-    # 為避免過度消耗資源，可以設定一個合理的上限
-    max_workers = min(os.cpu_count() or 1, len(tickers_list)) # 確保至少有1個worker，且不超過tickers數量
-    print(f"INFO: 啟動聯合作戰模式，使用最多 {max_workers} 個進程處理 {len(tickers_list)} 個標的。")
+    # 決定最大工作進程數，讓 ProcessPoolExecutor 自動決定 (通常是 os.cpu_count())
+    # 移除先前手動計算 max_workers 的邏輯
+    # max_workers = min(os.cpu_count() or 1, len(tickers_list)) # 舊邏輯
+    # print(f"INFO: 啟動聯合作戰模式，使用最多 {max_workers} 個進程處理 {len(tickers_list)} 個標的。")
+    print(f"INFO: 啟動聯合作戰模式，自動偵測並使用可用核心處理 {len(tickers_list)} 個標的。")
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor() as executor: # 移除 max_workers 參數，讓其自動決定
         # 準備提交給進程池的任務
         # future_to_ticker 映射，用於在任務完成時識別對應的 ticker
         future_to_ticker = {
