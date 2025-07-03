@@ -51,6 +51,8 @@ def main():
                         help="資料庫中儲存 OHLCV 數據的表格名稱。") # 中文化 help
     parser.add_argument("--asset-class", default="stock", choices=['stock', 'future', 'crypto'],
                         help="要分析的資產類別 (預設: stock)。") # 中文化 help
+    parser.add_argument("--cache-db-path", default="data_workspace/yfinance_cache.duckdb",
+                        help="DuckDB 快取資料庫檔案路徑。") # 中文化 help
     parser.add_argument("--process-uploads", action="store_true",
                         help="若指定，則處理 'uploads' 資料夾 (此功能待實現)。") # 中文化 help
 
@@ -69,12 +71,17 @@ def main():
         # TODO: 添加 file_processor 邏輯
 
     # 初始化組件
-    yf_client = YFinanceClient()
-    db_manager = DBManager(db_path=args.db_path)
-    analysis_engine = AnalysisEngine(db_manager_instance=db_manager) # 傳遞 db_manager 實例
+    # DBManager 現在需要 cache_db_path
+    db_manager = DBManager(db_path=args.db_path, cache_db_path=args.cache_db_path)
 
-    # 確保資料表存在 (使用 DBManager 的方法)
-    db_manager.create_ohlcv_table(table_name=args.table_name)
+    # YFinanceClient 現在需要 db_manager 實例
+    yf_client = YFinanceClient(db_manager=db_manager)
+
+    # AnalysisEngine 繼續使用同一個 db_manager 實例 (它將通過內部方法訪問主庫)
+    analysis_engine = AnalysisEngine(db_manager_instance=db_manager)
+
+    # 資料表創建已移至 DBManager 的 __init__ 方法中，此處不再需要單獨調用
+    # db_manager.create_ohlcv_table(table_name=args.table_name) # 已在 DBManager.__init__ 處理
 
     tickers_list = [ticker.strip().upper() for ticker in args.tickers.split(',')]
 
