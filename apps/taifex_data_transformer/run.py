@@ -9,6 +9,7 @@ from io import StringIO
 from datetime import datetime
 import pytz
 import time
+import json
 
 # --- 路徑自我校正樣板碼 ---
 try:
@@ -64,11 +65,21 @@ def create_target_table(conn: duckdb.DuckDBPyConnection, table_name: str):
     );
     """)
 
-def transform_and_load(raw_content_df: pd.DataFrame, target_conn: duckdb.DuckDBPyConnection, target_table: str):
+def transform_and_load(raw_content_df: pd.DataFrame, target_conn: duckdb.DuckDBPyConnection, target_table: str, enable_status_updates: bool = False):
     """在 Python 中處理文本內容，並將結構化數據載入目標資料庫"""
     all_clean_dfs = []
+    total_files = len(raw_content_df)
 
     for index, row in raw_content_df.iterrows():
+        if enable_status_updates:
+            status = {
+                "progress": index + 1,
+                "total": total_files,
+                "message": f"正在轉換檔案 {index + 1}/{total_files} ({row.get('source_file', 'N/A')}/{row.get('member_file', 'N/A')})..."
+            }
+            print(f"##STATUS##{json.dumps(status, ensure_ascii=False)}")
+            sys.stdout.flush()
+
         content_text = row['file_content_as_text']
         source_file = row['source_file']
         member_file = row['member_file']
@@ -204,6 +215,7 @@ def main():
     parser.add_argument("--raw-db-path", required=True, help="原始數據艙資料庫的路徑。")
     parser.add_argument("--analytics-db-path", required=True, help="最終分析資料庫的路徑。")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--enable-status-updates", action="store_true", help="啟用狀態更新通訊協議")
 
     args = parser.parse_args()
     logger.level = args.log_level.upper()
@@ -239,7 +251,7 @@ def main():
         else:
             logger.info(f"發現 {len(raw_content_df)} 筆原始文本記錄，開始轉換與載入...")
             start_time = time.time()
-            inserted_count = transform_and_load(raw_content_df, analytics_conn, target_table)
+            inserted_count = transform_and_load(raw_content_df, analytics_conn, target_table, args.enable_status_updates)
             duration = time.time() - start_time
             logger.success(f"轉換與載入流程完成，耗時: {duration:.2f} 秒。")
 
