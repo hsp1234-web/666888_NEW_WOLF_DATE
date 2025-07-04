@@ -1,234 +1,222 @@
-import subprocess
+# -*- coding: utf-8 -*-
+# 整合測試腳本 v35.2 - 驗證高速載入器與指紋機制
 import os
 import sys
+import subprocess
 import shutil
-import tempfile
 import zipfile
-import csv
 import duckdb
-from datetime import datetime
 
-# --- 設定區 ---
-PYTHON_EXECUTABLE = sys.executable
-PIPELINE_MODULE_PATH = "apps.taifex_data_pipeline.run" # 執行 run.py 作為模組
-# TEST_WORKSPACE = "/tmp/test_historical_pipeline_v32_2" # 使用固定路徑或臨時目錄
-TEST_WORKSPACE = tempfile.mkdtemp(prefix="test_pipeline_") # 每次創建唯一的臨時目錄
+# --- 測試配置 ---
+TEST_WORKSPACE = "/tmp/test_harness_v35_p2"
+RAW_DATA_DIR = os.path.join(TEST_WORKSPACE, "raw_files")
+DB_DIR = os.path.join(TEST_WORKSPACE, "databases")
+METADATA_DB_PATH = os.path.join(DB_DIR, "pipeline_metadata.duckdb")
+RAW_DB_PATH = os.path.join(DB_DIR, "raw_taifex.duckdb")
 
-TEST_DATA_DIR = os.path.join(TEST_WORKSPACE, "source_data")
-TEST_DB_DIR = os.path.join(TEST_WORKSPACE, "databases")
-TEST_DB_NAME = "test_output_v32_2.duckdb"
-REQUIREMENTS_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "requirements.txt"))
-
-# --- 路徑自我校正 (確保能找到 apps 模組) ---
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
-# --- 模擬數據生成 ---
-def create_mock_csv_data(file_path: str, num_rows: int, is_option: bool = False):
-    """創建一個模擬的選擇權或期貨CSV檔案"""
-    headers_futures = ['交易日期', '契約', '到期月份(週別)', '開盤價', '最高價', '最低價', '收盤價', '成交量', '結算價', '未沖銷契約量', '交易時段']
-    headers_options = ['交易日期', '契約', '到期月份(週別)', '履約價', '買賣權', '開盤價', '最高價', '最低價', '收盤價', '成交量', '結算價', '未沖銷契約量', '交易時段']
-
-    headers = headers_options if is_option else headers_futures
-
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    with open(file_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(headers)
-        for i in range(num_rows):
-            date_str = datetime(2024, 7, (i % 28) + 1).strftime('%Y/%m/%d')
-            product_id = "TXO" if is_option else "TXF"
-            expiry = "202407W4" if (i % 2 == 0) else "202408"
-
-            row_data = [
-                date_str,
-                product_id,
-                expiry,
-            ]
-            if is_option:
-                row_data.extend([
-                    str(18000 + i * 100), # 履約價
-                    "Call" if i % 2 == 0 else "Put", # 買賣權
-                ])
-
-            row_data.extend([
-                str(18000 + i), # 開盤價
-                str(18050 + i), # 最高價
-                str(17950 + i), # 最低價
-                str(18020 + i), # 收盤價
-                str(100 + i * 10), # 成交量
-                str(18025 + i), # 結算價
-                str(5000 + i * 50), # 未沖銷契約量
-                "一般" # 交易時段
-            ])
-            writer.writerow(row_data)
-    print(f"    模擬CSV檔案已創建: {file_path} ({num_rows} 行)")
-
-def create_mock_zip_file(zip_path: str, csv_file_name_in_zip: str, num_rows: int, is_option: bool = False):
-    """創建一個包含模擬CSV檔案的ZIP檔案"""
-    # 在臨時位置創建CSV
-    temp_csv_dir = os.path.join(os.path.dirname(zip_path), "temp_csv_for_zip")
-    os.makedirs(temp_csv_dir, exist_ok=True)
-    temp_csv_path = os.path.join(temp_csv_dir, csv_file_name_in_zip)
-
-    create_mock_csv_data(temp_csv_path, num_rows, is_option)
-
-    os.makedirs(os.path.dirname(zip_path), exist_ok=True)
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        zf.write(temp_csv_path, arcname=csv_file_name_in_zip)
-    print(f"    模擬ZIP檔案已創建: {zip_path} (內含 {csv_file_name_in_zip}, {num_rows} 行)")
-    shutil.rmtree(temp_csv_dir) # 清理臨時CSV
-
-# --- 測試流程 ---
-print(f"--- 開始執行 taifex_data_pipeline v32.2 整合測試 ---")
-print(f"--- 測試工作區: {TEST_WORKSPACE} ---")
-
-# 1. 清理並建立測試環境
-print(f"\n1. 清理並建立測試工作區...")
-if os.path.exists(TEST_DB_DIR): # 只清理 DB 目錄，避免 source_data 被重複創建的腳本意外刪除
-    shutil.rmtree(TEST_DB_DIR)
-os.makedirs(TEST_DATA_DIR, exist_ok=True)
-os.makedirs(TEST_DB_DIR, exist_ok=True)
-print(f"    測試資料目錄: {TEST_DATA_DIR}")
-print(f"    測試資料庫目錄: {TEST_DB_DIR}")
-
-
-# 2. 建立模擬數據檔案
-print("\n2. 建立模擬輸入數據檔案...")
-mock_csv_path1 = os.path.join(TEST_DATA_DIR, "futures_daily_20240701.csv")
-mock_csv_path2 = os.path.join(TEST_DATA_DIR, "options_daily_20240702.csv")
-mock_zip_path1 = os.path.join(TEST_DATA_DIR, "TXF_Daily_2024.zip") # 模擬期交所的命名
-mock_zip_path2 = os.path.join(TEST_DATA_DIR, "TXO_Daily_2024.zip")
-
-create_mock_csv_data(mock_csv_path1, num_rows=10, is_option=False)
-create_mock_csv_data(mock_csv_path2, num_rows=15, is_option=True)
-create_mock_zip_file(mock_zip_path1, "FuturesDaily_20240703.csv", num_rows=20, is_option=False)
-create_mock_zip_file(mock_zip_path2, "OptionsDaily_20240704.csv", num_rows=25, is_option=True)
-
-input_files_for_pipeline = [mock_csv_path1, mock_csv_path2, mock_zip_path1, mock_zip_path2]
-expected_total_rows = 10 + 15 + 20 + 25
-
-# 3. 安裝依賴 (如果需要，通常在 CI 環境中這步是分開的)
-print(f"\n3. 檢查依賴文件: {REQUIREMENTS_PATH}")
-if not os.path.exists(REQUIREMENTS_PATH):
-    print(f"❌ 錯誤: requirements.txt 未在預期路徑找到: {REQUIREMENTS_PATH}")
-    sys.exit(1)
-# 實際安裝步驟通常在外部執行，這裡只做示意或確認
-# print(f"   (跳過實際 pip install -r，假設環境已準備好或由 CI 處理)")
-print(f"   執行 pip install -r {REQUIREMENTS_PATH}...")
-pip_result = subprocess.run([PYTHON_EXECUTABLE, "-m", "pip", "install", "-r", REQUIREMENTS_PATH], capture_output=True, text=True, encoding='utf-8', errors='replace')
-if pip_result.returncode != 0:
-    print("❌ 依賴安裝失敗!")
-    print("STDOUT:")
-    print(pip_result.stdout)
-    print("STDERR:")
-    print(pip_result.stderr)
-    # sys.exit(1) # 暫時不退出，允許在本地環境中即使有些警告也繼續，但在 CI 中應嚴格
-    print("⚠️ 依賴安裝過程中有非零返回碼，但測試將繼續...")
-else:
-    print("✅ 依賴安裝成功 (或已滿足)。")
-if pip_result.stdout: print(f"Pip STDOUT (部分):\n{pip_result.stdout[:500]}...")
-
-
-# 4. 執行數據精煉廠
-print("\n4. 執行數據精煉廠 (taifex_data_pipeline)...")
-cmd = [
-    PYTHON_EXECUTABLE, "-m", PIPELINE_MODULE_PATH,
-    "--input-files", *input_files_for_pipeline,
-    "--db-output-dir", TEST_DB_DIR,
-    "--db-name", TEST_DB_NAME,
-    "--log-level", "INFO" # 使用 INFO 級別以獲得更簡潔的日誌，DEBUG 用於詳細除錯
-]
-print(f"    執行指令: {' '.join(cmd)}")
-print(f"    執行目錄 (cwd): {project_root}")
-
-pipeline_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace', cwd=project_root)
-pipeline_stdout, pipeline_stderr = pipeline_process.communicate()
-return_code = pipeline_process.returncode
-
-print("\n--- 管線執行日誌 ---")
-print("STDOUT:")
-print(pipeline_stdout)
-print("\nSTDERR:")
-print(pipeline_stderr)
-print("--- 日誌結束 ---")
-
-if return_code != 0:
-    print(f"❌ 管線執行失敗，返回碼: {return_code}")
-    if "ModuleNotFoundError" in pipeline_stderr or "ModuleNotFoundError" in pipeline_stdout:
-        print("❌ 偵測到 ModuleNotFoundError。請檢查依賴。")
-    # shutil.rmtree(TEST_WORKSPACE) # 執行失敗時保留工作區以便偵錯
-    # print(f"測試工作區 {TEST_WORKSPACE} 已保留以供偵錯。")
-    sys.exit(1)
-print(f"✅ 管線執行成功，返回碼: {return_code}")
-
-# 5. 驗證數據庫結果
-print("\n5. 驗證數據庫結果...")
-db_full_path = os.path.join(TEST_DB_DIR, TEST_DB_NAME)
-if not os.path.exists(db_full_path):
-    print(f"❌ 測試失敗：資料庫檔案未創建於 {db_full_path}")
-    # shutil.rmtree(TEST_WORKSPACE)
-    # print(f"測試工作區 {TEST_WORKSPACE} 已保留以供偵錯。")
-    sys.exit(1)
-
+# 獲取 run.py 和 manager.py 的絕對路徑
 try:
-    con = duckdb.connect(database=db_full_path, read_only=True)
-
-    # 檢查目標表格是否存在
-    target_table_name = "raw_taifex_data"
-    tables_result = con.execute("SHOW TABLES;").fetchall()
-    available_tables = [table[0] for table in tables_result]
-    print(f"    資料庫中可用的表格: {available_tables}")
-    if target_table_name not in available_tables:
-        print(f"❌ 測試失敗：目標表格 '{target_table_name}' 未在資料庫中找到。")
-        con.close()
-        # shutil.rmtree(TEST_WORKSPACE)
-        # print(f"測試工作區 {TEST_WORKSPACE} 已保留以供偵錯。")
-        sys.exit(1)
-    print(f"✅ 目標表格 '{target_table_name}' 已找到。")
-
-    # 檢查總行數
-    count_result = con.execute(f"SELECT COUNT(*) FROM {target_table_name};").fetchone()
-    if count_result is None:
-        print(f"❌ 測試失敗：無法從 '{target_table_name}' 讀取行數。")
-        con.close()
-        # shutil.rmtree(TEST_WORKSPACE)
-        # print(f"測試工作區 {TEST_WORKSPACE} 已保留以供偵錯。")
-        sys.exit(1)
-
-    actual_rows_in_db = count_result[0]
-    print(f"    資料庫中 '{target_table_name}' 的實際行數: {actual_rows_in_db}")
-    print(f"    預期總行數 (來自所有模擬檔案): {expected_total_rows}")
-
-    if actual_rows_in_db == expected_total_rows:
-        print(f"✅ 數據驗證成功：資料庫中的行數 ({actual_rows_in_db}) 與預期 ({expected_total_rows}) 相符！")
-    else:
-        print(f"❌ 數據驗證失敗：資料庫中的行數 ({actual_rows_in_db}) 與預期 ({expected_total_rows}) 不符。")
-        # 顯示一些數據樣本以供偵錯
-        sample_data = con.execute(f"SELECT source_file, COUNT(*) as count FROM {target_table_name} GROUP BY source_file;").fetchall()
-        print(f"    按 source_file 分組的數據行數: {sample_data}")
-        con.close()
-        # shutil.rmtree(TEST_WORKSPACE)
-        # print(f"測試工作區 {TEST_WORKSPACE} 已保留以供偵錯。")
-        sys.exit(1)
-
-    con.close()
-
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dir, '..', '..'))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    PIPELINE_RUN_SCRIPT = os.path.join(current_dir, "run.py")
 except Exception as e:
-    print(f"❌ 驗證數據庫時發生錯誤: {e}")
-    # shutil.rmtree(TEST_WORKSPACE)
-    # print(f"測試工作區 {TEST_WORKSPACE} 已保留以供偵錯。")
+    print(f"路徑設定錯誤: {e}")
     sys.exit(1)
 
-# 清理測試工作區
-print(f"\n6. 清理測試工作區: {TEST_WORKSPACE}")
-try:
-    shutil.rmtree(TEST_WORKSPACE)
-    print(f"    測試工作區已成功刪除。")
-except Exception as e_clean:
-    print(f"    ⚠️ 清理測試工作區時發生錯誤: {e_clean}")
+
+def print_header(title):
+    print("\n" + "="*80)
+    print(f"🧪  {title}")
+    print("="*80)
+
+def setup_test_environment():
+    """清理並建立一個乾淨的測試環境"""
+    print_header("1. 建立測試環境")
+    if os.path.exists(TEST_WORKSPACE):
+        shutil.rmtree(TEST_WORKSPACE)
+    os.makedirs(RAW_DATA_DIR, exist_ok=True)
+    os.makedirs(DB_DIR, exist_ok=True)
+
+    # 建立虛假數據檔案
+    # File A: 包含 2 個 CSV 成員
+    with zipfile.ZipFile(os.path.join(RAW_DATA_DIR, "file_A.zip"), 'w') as zf:
+        zf.writestr("futures.csv", "col1,col2\nfuture1,100")
+        zf.writestr("options.csv", "colA,colB\noptionA,200")
+
+    # File B: 只有 1 個 CSV 成員
+    with open(os.path.join(RAW_DATA_DIR, "file_B.csv"), 'w') as f:
+        f.write("header1,header2\nsingle_row,300")
+
+    print(f"✅ 測試環境 '{TEST_WORKSPACE}' 建立完畢。")
+
+def run_pipeline(input_files: list) -> subprocess.CompletedProcess:
+    """執行高速載入器腳本"""
+    cmd = [
+        sys.executable, PIPELINE_RUN_SCRIPT,
+        "--input-files"] + input_files + [
+        "--db-output-dir", DB_DIR,
+        "--db-name", os.path.basename(RAW_DB_PATH),
+        "--metadata-db-path", METADATA_DB_PATH,
+        "--log-level", "INFO"
+    ]
+    print(f"🚀 執行指令: {' '.join(cmd)}")
+    return subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+
+def verify_db_state(db_path, table, expected_rows, description, fingerprint_to_check=None, expected_etl_version=None):
+    """驗證資料庫狀態，可選檢查特定指紋的 ETL 版本"""
+    print(f"🔍 {description}")
+    if not os.path.exists(db_path):
+        print(f"❌ 驗證失敗: 資料庫檔案不存在 {db_path}")
+        return False
+
+    conn = duckdb.connect(db_path, read_only=True)
+    success = True
+    try:
+        count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        if count == expected_rows:
+            print(f"✅ 驗證成功: 表格 '{table}' 中有 {count} 筆記錄，符合預期。")
+        else:
+            print(f"❌ 驗證失敗: 表格 '{table}' 中有 {count} 筆記錄，預期為 {expected_rows}。")
+            # 打印表格內容以供除錯
+            print("目前表格內容：")
+            print(conn.execute(f"SELECT * FROM {table}").fetchdf())
+            success = False
+
+        if fingerprint_to_check and expected_etl_version:
+            etl_version_in_db = conn.execute(
+                f"SELECT etl_version FROM {table} WHERE fingerprint = ?", [fingerprint_to_check]
+            ).fetchone()
+            if etl_version_in_db and etl_version_in_db[0] == expected_etl_version:
+                print(f"✅ 驗證成功: 指紋 '{fingerprint_to_check[:8]}...' 的 ETL 版本為 '{etl_version_in_db[0]}'，符合預期。")
+            elif not etl_version_in_db:
+                print(f"❌ 驗證失敗: 在表格 '{table}' 中找不到指紋 '{fingerprint_to_check[:8]}...'。")
+                success = False
+            else:
+                print(f"❌ 驗證失敗: 指紋 '{fingerprint_to_check[:8]}...' 的 ETL 版本為 '{etl_version_in_db[0]}'，預期為 '{expected_etl_version}'。")
+                success = False
+
+        return success
+    except Exception as e:
+        print(f"❌ 驗證失敗: 查詢資料庫時發生錯誤: {e}")
+        return False
+    finally:
+        conn.close()
+
+def get_file_fingerprint(file_path):
+    """計算檔案的 SHA256 指紋 - 與 manager.py 中的邏輯保持一致"""
+    import hashlib
+    sha256_hash = hashlib.sha256()
+    try:
+        with open(file_path, "rb") as f:
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+    except Exception:
+        return None
+
+def main():
+    all_tests_passed = True
+    try:
+        setup_test_environment()
+
+        file_a_path = os.path.join(RAW_DATA_DIR, "file_A.zip")
+        file_b_path = os.path.join(RAW_DATA_DIR, "file_B.csv")
+
+        # --- 首次執行測試 ---
+        print_header("2. 首次執行 - 處理新檔案")
+        files_to_process_1 = [file_a_path, file_b_path]
+        result1 = run_pipeline(files_to_process_1)
+        print("--- stdout ---")
+        print(result1.stdout)
+        print("--- stderr ---")
+        print(result1.stderr)
+        if not (result1.returncode == 0 and \
+                verify_db_state(METADATA_DB_PATH, "processed_files", 2, "驗證「作戰日誌」是否記錄了 2 個檔案", fingerprint_to_check=get_file_fingerprint(file_a_path), expected_etl_version="v35.0-loader") and \
+                verify_db_state(RAW_DB_PATH, "raw_import_log", 3, "驗證「原始數據艙」是否包含了 3 筆原始數據 (2 from zip, 1 from csv)")):
+            all_tests_passed = False
+            print("❌ 首次執行測試失敗")
 
 
-print("\n--- 整合測試執行完畢 (v32.2) ---")
-sys.exit(0)
+        # --- 重複處理驗證 ---
+        if all_tests_passed:
+            print_header("3. 重複執行 - 驗證指紋跳過機制")
+            result2 = run_pipeline(files_to_process_1) # 再次處理相同的檔案
+            print("--- stdout ---")
+            print(result2.stdout)
+            print("--- stderr ---")
+            print(result2.stderr)
+            if not (result2.returncode == 0 and \
+                    "偵測到已處理檔案" in result2.stdout and \
+                    "跳過: file_A.zip" in result2.stdout and \
+                    "跳過: file_B.csv" in result2.stdout and \
+                    verify_db_state(METADATA_DB_PATH, "processed_files", 2, "驗證「作戰日誌」總筆數是否仍為 2") and \
+                    verify_db_state(RAW_DB_PATH, "raw_import_log", 3, "驗證「原始數據艙」總筆數是否仍為 3")):
+                all_tests_passed = False
+                print("❌ 重複處理驗證失敗")
+
+        # --- 增量處理驗證 ---
+        if all_tests_passed:
+            print_header("4. 增量執行 - 處理新檔案與修改過的檔案")
+
+            # 獲取 file_B 的原始指紋，用於稍後驗證其 etl_version 未變
+            original_fingerprint_b = get_file_fingerprint(file_b_path)
+
+            # 修改 file_A.zip (重新寫入，指紋會改變)
+            with zipfile.ZipFile(file_a_path, 'w') as zf:
+                zf.writestr("new_member.csv", "new_data,400")
+            modified_fingerprint_a = get_file_fingerprint(file_a_path)
+
+            # 新增 file_C.csv
+            file_c_path = os.path.join(RAW_DATA_DIR, "file_C.csv")
+            with open(file_c_path, 'w') as f:
+                f.write("another,500")
+            fingerprint_c = get_file_fingerprint(file_c_path)
+
+            files_to_process_3 = [file_a_path, file_b_path, file_c_path]
+            result3 = run_pipeline(files_to_process_3)
+            print("--- stdout ---")
+            print(result3.stdout)
+            print("--- stderr ---")
+            print(result3.stderr)
+
+            if not (result3.returncode == 0 and \
+                    "跳過: file_B.csv" in result3.stdout and \
+                    "處理新檔案: file_A.zip" in result3.stdout and \
+                    "處理新檔案: file_C.csv" in result3.stdout and \
+                    verify_db_state(METADATA_DB_PATH, "processed_files", 4, "驗證「作戰日誌」總筆數是否為 4 (A舊, B, A新, C)") and \
+                    verify_db_state(METADATA_DB_PATH, "processed_files", 4, "檢查 file_A (修改後) 的 ETL 版本", fingerprint_to_check=modified_fingerprint_a, expected_etl_version="v35.0-loader") and \
+                    verify_db_state(METADATA_DB_PATH, "processed_files", 4, "檢查 file_B (未修改) 的 ETL 版本", fingerprint_to_check=original_fingerprint_b, expected_etl_version="v35.0-loader") and \
+                    verify_db_state(METADATA_DB_PATH, "processed_files", 4, "檢查 file_C (新增) 的 ETL 版本", fingerprint_to_check=fingerprint_c, expected_etl_version="v35.0-loader") and \
+                    verify_db_state(RAW_DB_PATH, "raw_import_log", 5, "驗證「原始數據艙」總筆數是否為 5 (2舊A + 1舊B + 1新A + 1新C)")):
+                all_tests_passed = False
+                print("❌ 增量處理驗證失敗")
+
+    except Exception as e:
+        import traceback
+        print(f"測試腳本執行期間發生未預期的嚴重錯誤: {e}")
+        traceback.print_exc()
+        all_tests_passed = False
+    finally:
+        # --- 清理 ---
+        print_header("5. 清理測試環境")
+        if os.path.exists(TEST_WORKSPACE):
+            shutil.rmtree(TEST_WORKSPACE)
+            print(f"✅ 測試工作區 '{TEST_WORKSPACE}' 已成功刪除。")
+        else:
+            print(f"ℹ️ 測試工作區 '{TEST_WORKSPACE}' 未找到，可能已被清理。")
+
+        if all_tests_passed:
+            print("\n" + "#"*30)
+            print("✅  高速載入器（含指紋驗證）整合測試成功！")
+            print("#"*30)
+            sys.exit(0)
+        else:
+            print("\n" + "!"*30)
+            print("❌  高速載入器（含指紋驗證）整合測試失敗。")
+            print("!"*30)
+            sys.exit(1)
+
+if __name__ == "__main__":
+    main()
