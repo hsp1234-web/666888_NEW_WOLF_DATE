@@ -58,9 +58,11 @@ class DBManager:
         );
         """
         db_to_use = target_db_path if target_db_path else self.db_path
-        config = self._get_db_connection_config()
+        # config = self._get_db_connection_config() # 獲取配置字典
         try:
-            with duckdb.connect(database=db_to_use, config=config if config else None) as con:
+            # 確保 config 參數總是傳遞一個字典，即使是空的
+            # 寫操作，read_only=False
+            with duckdb.connect(database=db_to_use, read_only=False, config=self._get_db_connection_config()) as con:
                 con.execute(create_sql)
             print(f"INFO: 資料表 '{table_name}' 已在資料庫 '{db_to_use}' 中準備就緒。")
         except Exception as e:
@@ -126,9 +128,10 @@ class DBManager:
             return
 
         db_to_use = target_db_path if target_db_path else self.db_path
-        config = self._get_db_connection_config()
+        # config = self._get_db_connection_config() # 獲取配置字典
         try:
-            with duckdb.connect(database=db_to_use, config=config if config else None) as con:
+            # 寫操作，read_only=False
+            with duckdb.connect(database=db_to_use, read_only=False, config=self._get_db_connection_config()) as con:
                 con.register('df_view_to_insert', df_to_insert)
                 columns_str = ", ".join(required_cols)
                 upsert_sql = f"INSERT OR REPLACE INTO {table_name} ({columns_str}) SELECT {columns_str} FROM df_view_to_insert"
@@ -154,10 +157,11 @@ class DBManager:
             WHERE ticker = ? AND datetime >= CAST(? AS TIMESTAMPTZ) AND datetime < CAST(? AS TIMESTAMPTZ)
             ORDER BY datetime ASC
             """
-            config = self._get_db_connection_config()
+            # config = self._get_db_connection_config() # 獲取配置字典
             # self.db_path is used here as query_data_for_day is likely for the main DB.
             # If it could target other DBs, target_db_path would need to be a parameter.
-            with duckdb.connect(database=self.db_path, config=config if config else None) as con:
+            # 讀操作，read_only=True
+            with duckdb.connect(database=self.db_path, read_only=True, config=self._get_db_connection_config()) as con:
                 result_df = con.execute(query, [ticker, start_of_day, start_of_next_day]).fetchdf()
 
             if not result_df.empty and 'datetime' in result_df.columns:
@@ -230,9 +234,10 @@ class DBManager:
         ORDER BY datetime ASC
         """
         db_to_use = target_db_path if target_db_path else self.db_path
-        config = self._get_db_connection_config()
+        # config = self._get_db_connection_config() # 獲取配置字典
         try:
-            with duckdb.connect(database=db_to_use, config=config if config else None) as con:
+            # 讀操作，read_only=True
+            with duckdb.connect(database=db_to_use, read_only=True, config=self._get_db_connection_config()) as con:
                 result_df = con.execute(query, [ticker, interval, query_start_ts, query_end_ts]).fetchdf()
             if not result_df.empty and 'datetime' in result_df.columns:
                 result_df['datetime'] = pd.to_datetime(result_df['datetime'])
@@ -255,6 +260,22 @@ class DBManager:
             cached_df = pd.DataFrame()
         print(f"INFO: check_cache: 對於 {ticker} (顆粒度: {interval}), 在資料庫 '{db_to_use}' 中找到 {len(cached_df)} 筆快取記錄。缺失 {len(missing_dates)} 個日期: {missing_dates[:5]}{'...' if len(missing_dates) > 5 else ''}") # 中文化更新
         return cached_df, missing_dates
+
+    def checkpoint_db(self, target_db_path: str | None = None):
+        """
+        對指定的資料庫執行 CHECKPOINT 和 VACUUM 操作以確保數據持久化。
+        """
+        db_to_use = target_db_path if target_db_path else self.db_path
+        try:
+            print(f"INFO: 準備對資料庫 {db_to_use} 執行 CHECKPOINT 和 VACUUM...")
+            # 使用 read_only=False 和與初始化時相似的 config 邏輯
+            current_config = self._get_db_connection_config()
+            with duckdb.connect(database=db_to_use, read_only=False, config=current_config) as con:
+                con.execute("CHECKPOINT;")
+                con.execute("VACUUM;")
+            print(f"INFO: 資料庫 {db_to_use} CHECKPOINT 和 VACUUM 完成。")
+        except Exception as e:
+            print(f"錯誤: 對資料庫 {db_to_use} 執行 CHECKPOINT/VACUUM 失敗: {e}")
 
 if __name__ == '__main__':
     print("--- DBManager (Daily Market Analyzer) 測試 ---")

@@ -144,11 +144,25 @@ def dynamic_worker(task_queue: multiprocessing.Queue, result_queue: multiprocess
                     print(f"--- [WorkerID:{worker_id}, Ticker:{ticker}] (詳細) 數據獲取成功 ({len(hydrated_df)} 行)，準備寫入共享記憶體... ---")
 
                 original_df_columns = list(hydrated_df.columns)
+                if verbose_mode and 'datetime' in hydrated_df.columns:
+                    print(f"DEBUG [WorkerID:{worker_id}, Ticker:{ticker}] Original datetime HEAD:\n{hydrated_df['datetime'].head()}")
 
                 if pd.api.types.is_datetime64_any_dtype(hydrated_df['datetime']):
+                    # 1. 確保 datetime 是 naive UTC
                     if hydrated_df['datetime'].dt.tz is not None:
                         hydrated_df['datetime'] = hydrated_df['datetime'].dt.tz_convert('UTC').dt.tz_localize(None)
+                    # else: # 如果是 naive，則假定它已经是 UTC-like or an appropriate representation
+                        # print(f"DEBUG [WorkerID:{worker_id}, Ticker:{ticker}] datetime is naive, assuming UTC-like for int64 conversion.")
+
+                    # 2. 無論原始精度，先統一轉換為 datetime64[ns]
+                    hydrated_df['datetime'] = hydrated_df['datetime'].astype('datetime64[ns]')
+                    if verbose_mode:
+                         print(f"DEBUG [WorkerID:{worker_id}, Ticker:{ticker}] datetime astype('datetime64[ns]') before int64 conversion HEAD:\n{hydrated_df['datetime'].head()}")
+
+                    # 3. 轉換為 int64 (nanoseconds since epoch)
                     hydrated_df['datetime'] = hydrated_df['datetime'].astype(np.int64)
+                    if verbose_mode:
+                        print(f"DEBUG [WorkerID:{worker_id}, Ticker:{ticker}] int64 datetime HEAD for SHM:\n{hydrated_df['datetime'].head()}")
 
                 data_for_shm_numpy = hydrated_df[numeric_cols_for_shm].to_numpy()
 
@@ -359,10 +373,17 @@ def main():
                             shm_meta["shape"], dtype=shm_meta["dtype"], buffer=shm_instance_main.buf
                         ).copy()
 
+                        if args.verbose and reconstructed_np_array.shape[1] > 0 : # 假設 datetime 是第一列
+                             print(f"DEBUG [Main, Ticker:{res_ticker}] Reconstructed np_array datetime (int64) column HEAD:\n{reconstructed_np_array[:5, 0]}")
+
                         temp_df = pd.DataFrame(reconstructed_np_array, columns=shm_meta["columns_numeric"])
 
                         if 'datetime' in temp_df.columns and shm_meta["columns_numeric"][0] == 'datetime':
+                            if args.verbose:
+                                print(f"DEBUG [Main, Ticker:{res_ticker}] temp_df datetime (int64) before pd.to_datetime HEAD:\n{temp_df['datetime'].head()}")
                             temp_df['datetime'] = pd.to_datetime(temp_df['datetime'], unit='ns', utc=True)
+                            if args.verbose:
+                                print(f"DEBUG [Main, Ticker:{res_ticker}] temp_df datetime (UTC) after pd.to_datetime HEAD:\n{temp_df['datetime'].head()}")
 
                         temp_df['ticker'] = res_ticker
                         temp_df['interval'] = shm_meta.get("interval_value", "unknown_main_interval")
@@ -422,20 +443,41 @@ def main():
 
             final_master_df = pd.concat(all_hydrated_dfs_data, ignore_index=True)
             if not final_master_df.empty:
-                print(f"INFO: 數據合併完成，總共 {len(final_master_df)} 筆數據。準備一次性寫入主分析資料庫 '{args.db_path}'...")
-                try:
-                    db_manager.upsert_data(final_master_df, table_name=args.table_name, target_db_path=args.db_path)
-                    print(f"INFO: {len(final_master_df)} 筆合併數據成功寫入主分析資料庫。")
+                print(f"DEBUG: 合併後的 final_master_df info:")
+                final_master_df.info()
+                print(f"DEBUG: final_master_df 中的 Tickers: {final_master_df['ticker'].unique()}")
+                # print(f"INFO: 數據合併完成，總共 {len(final_master_df)} 筆數據。準備一次性寫入主分析資料庫 '{args.db_path}'...")
+
+                # 修改為按 ticker 分組寫入
+                print(f"INFO: 數據合併完成，總共 {len(final_master_df)} 筆數據。準備分批按 ticker 寫入主分析資料庫 '{args.db_path}'...")
+                any_upsert_failed = False
+                for ticker_name, group_df in final_master_df.groupby('ticker'):
+                    print(f"INFO: 正在寫入標的 {ticker_name} 的數據 ({len(group_df)} 筆)...")
+                    if ticker_name == "GOOG" and args.verbose: # 為 GOOG 添加額外調試日誌
+                        print(f"DEBUG: GOOG group_df info BEFORE upsert:")
+                        group_df.info()
+                        print(f"DEBUG: GOOG group_df head BEFORE upsert:\n{group_df.head()}")
+                        print(f"DEBUG: GOOG group_df tail BEFORE upsert:\n{group_df.tail()}")
+                    try:
+                        db_manager.upsert_data(group_df, table_name=args.table_name, target_db_path=args.db_path)
+                        # upsert_data 內部已有成功日誌，這裡不再重複打印 "標的 ... 成功寫入"
+                    except Exception as e_group_upsert:
+                        print(f"錯誤：寫入標的 {ticker_name} 的數據到主分析資料庫失敗: {e_group_upsert}")
+                        any_upsert_failed = True
+                        # 即使一個 ticker 失敗，也嘗試繼續其它 ticker
+
+                if not any_upsert_failed:
+                    print(f"INFO: 所有標的數據均已成功嘗試寫入主分析資料庫。")
                     data_processed_successfully = True
-                except Exception as e_main_upsert:
-                    print(f"錯誤：將合併後的數據寫入主分析資料庫 '{args.db_path}' 失敗: {e_main_upsert}")
+                else:
+                    print(f"警告：部分標的數據寫入主分析資料庫時發生錯誤。")
                     data_processed_successfully = False
             else:
                 print("INFO: 合併後的 DataFrame 為空，無需寫入主分析資料庫。")
-                data_processed_successfully = True
+                data_processed_successfully = True # 也算處理完成，只是沒數據
         else:
             print("INFO: 本次執行未獲取到任何新的數據可寫入主分析資料庫。")
-            data_processed_successfully = True
+            data_processed_successfully = True # 也算處理完成
 
         data_processing_end_time = datetime.now()
         data_task_duration_seconds = (data_processing_end_time - overall_start_time).total_seconds()
@@ -518,6 +560,23 @@ def main():
     print(f"\n--- 每日市場洞察報告引擎任務總執行完畢 ---")
     print(f"總任務結束時間: {overall_end_time_final.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"總執行時長: {total_script_duration_seconds:.2f} 秒")
+
+    # 在 run.py 結束前，對主數據庫執行 CHECKPOINT
+    if not args.report_only and data_processed_successfully: # 只在有數據實際寫入主數據庫時執行
+        if db_manager: # 確保 db_manager 實例存在
+            db_manager.checkpoint_db() # 調用 DBManager 的新方法，它會使用 self.db_path
+
+    # 同樣對快取資料庫執行 CHECKPOINT (如果使用了快取)
+    # 注意：快取資料庫的 checkpoint 可能更適合在每個 worker 完成對它的寫入後，
+    # 或者由一個專門的快取管理機制來處理，以避免這裡的單點 CHECKPOINT 成為瓶頸或引入複雜性。
+    # 但為了確保測試中快取數據的持久化，這裡也添加一個。
+    if not args.report_only and args.cache_db_path:
+        if db_manager: # 假設同一個 db_manager 實例可以用來 checkpoint 不同的 db 檔案路徑
+            # 理想情況下，應該有一個專門針對 cache_db 的 manager 實例或方法
+            # 為了簡單起見，暫時這樣調用，如果 DBManager.checkpoint_db() 接受 target_db_path
+            # (是的，我剛才讓它接受了 target_db_path)
+             db_manager.checkpoint_db(target_db_path=args.cache_db_path)
+
 
 if __name__ == "__main__":
     main()
