@@ -1,0 +1,4 @@
+# -*- coding: utf-8 -*-
+# 微應用 `pipeline_metadata_manager` 的依賴項目
+
+duckdb>=1.0.0 # 建議使用 DuckDB 1.0.0 或更高版本

@@ -51,20 +51,30 @@ class MetadataManager:
     """
     管理管線元數據，主要用於記錄和查詢已處理檔案的指紋。
     """
-    def __init__(self, db_path: str = None, table_name: str = None):
+    def __init__(self, db_path: str = None, table_name: str = None, connection: duckdb.DuckDBPyConnection = None):
         """
-        初始化 MetadataManager，連接到 DuckDB 資料庫並確保必要的資料表存在。
+        初始化 MetadataManager。
+        可以傳入一個已存在的 DuckDB 連線，或者依賴 db_path 參數建立新連線。
 
         Args:
             db_path (str, optional): DuckDB 資料庫檔案的路徑。
-                                     若為 None，則從 config 讀取。
+                                     若 connection 為 None 且此參數也為 None，則從 config 讀取。
+                                     如果提供了 connection，則此參數被忽略。
             table_name (str, optional): 儲存處理記錄的資料表名稱。
                                         若為 None，則從 config 讀取。
+            connection (duckdb.DuckDBPyConnection, optional): 一個已存在的 DuckDB 連線物件。
+                                                            如果提供，則管理器將使用此連線。
         """
-        self.db_path = db_path if db_path is not None else config.DATABASE_FILENAME
         self.table_name = table_name if table_name is not None else config.PROCESSED_FILES_TABLE_NAME
-        # 在 __init__ 中建立並儲存連線，特別是對於記憶體資料庫
-        self.conn = duckdb.connect(database=self.db_path, read_only=False)
+
+        if connection:
+            self.conn = connection
+            # 如果使用外部連線，db_path 可能不相關或不準確，但為了完整性可以嘗試保留
+            self.db_path = db_path # 或者可以設為 None 或從連線中獲取（如果 DuckDB API 支援）
+        else:
+            self.db_path = db_path if db_path is not None else config.DATABASE_FILENAME
+            self.conn = duckdb.connect(database=self.db_path, read_only=False)
+
         self._initialize_database()
 
     # def _get_connection(self):
