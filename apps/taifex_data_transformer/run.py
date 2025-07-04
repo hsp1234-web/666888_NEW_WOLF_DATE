@@ -89,7 +89,17 @@ def transform_and_load(raw_content_df: pd.DataFrame, target_conn: duckdb.DuckDBP
             # 清理欄位名中的空格，並將其轉換為標準的 snake_case 或保持原樣以便後續 .get()
             df.columns = [col.strip().replace(' ', '_').replace('(', '').replace(')', '') for col in df.columns]
 
-            logger.debug(f"DataFrame columns after cleaning for {source_file}/{member_file}: {list(df.columns)}")
+            # 緊急修復：兼容 '成交日期' 欄位
+            # 在 pd.read_csv(...) 之後，且欄位名稱清理之後
+            if '成交日期' in df.columns and '交易日期' not in df.columns:
+                df.rename(columns={'成交日期': '交易日期'}, inplace=True)
+                logger.info(f"成功將欄位 '成交日期' 兼容為 '交易日期' (來源: {source_file}/{member_file})")
+            elif '成交日期' in df.columns and '交易日期' in df.columns:
+                # 理論上不應該同時存在，但若存在，優先使用 '交易日期'，並記錄警告
+                logger.warning(f"欄位 '成交日期' 和 '交易日期' 同時存在於 {source_file}/{member_file}。將優先使用 '交易日期'。")
+            # 如果只有 '交易日期'，則什麼都不做，流程正常
+
+            logger.debug(f"DataFrame columns after cleaning and compatibility fix for {source_file}/{member_file}: {list(df.columns)}")
             logger.debug(f"DataFrame head for {source_file}/{member_file}:\n{df.head().to_string()}")
 
             trading_date_series = df.get('交易日期') # 假設清理後的欄位名仍然是 '交易日期'
@@ -205,8 +215,15 @@ def main():
     raw_conn = None
     analytics_conn = None
     try:
-        raw_conn = duckdb.connect(database=args.raw_db_path, read_only=True)
-        analytics_conn = duckdb.connect(database=args.analytics_db_path)
+        # 調整 raw_conn 的連接邏輯，以便處理記憶體資料庫
+        if args.raw_db_path.lower() == "memory" or args.raw_db_path == ":memory:":
+            logger.info(f"使用記憶體原始數據艙 (非只讀模式初始連接)。")
+            raw_conn = duckdb.connect(database=":memory:") # 首次連接記憶體資料庫不能是只讀
+        else:
+            logger.info(f"從檔案系統連接原始數據艙 (只讀模式): {args.raw_db_path}")
+            raw_conn = duckdb.connect(database=args.raw_db_path, read_only=True)
+
+        analytics_conn = duckdb.connect(database=args.analytics_db_path) # 分析資料庫通常需要寫入
 
         target_table = "daily_ohlc"
         create_target_table(analytics_conn, target_table) # 確保表和序列存在
