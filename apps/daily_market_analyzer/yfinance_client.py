@@ -52,7 +52,8 @@ class YFinanceClient:
         self.cache_dir = cache_dir
         os.makedirs(self.cache_dir, exist_ok=True)
         self.FALLBACK_INTERVALS = ['1m', '5m', '15m', '30m', '1h', '1d', '1wk', '1mo']
-        print(f"INFO: YFinanceClient (Data Hydrator v2) 初始化完畢，使用 DBManager 進行快取。Fallback intervals: {self.FALLBACK_INTERVALS}")
+        self.HISTORICAL_FALLBACK = ['1d', '1wk', '1mo'] # 新增：歷史數據回溯策略
+        print(f"INFO: YFinanceClient (Data Hydrator v33.0) 初始化完畢。標準 Fallback: {self.FALLBACK_INTERVALS}, 歷史 Fallback: {self.HISTORICAL_FALLBACK}")
 
     def _get_chunk_size_for_interval(self, interval: str) -> int:
         if interval == '1m': return 6
@@ -129,12 +130,14 @@ class YFinanceClient:
             return None
 
     def hydrate_data_range(self, ticker: str, start_date_str: str, end_date_str: str, db_table_name: str = "market_ohlcv_analyzer", force_refresh: bool = False) -> tuple[pd.DataFrame | None, dict]:
-        print(f"===== 開始數據回填任務 (v2 Cache Integrated): Ticker={ticker}, Range=[{start_date_str} to {end_date_str}], ForceRefresh={force_refresh} =====")
+        print(f"===== 開始數據回填任務 (v33.0 Intelligent Hound): Ticker={ticker}, Range=[{start_date_str} to {end_date_str}], ForceRefresh={force_refresh} =====")
         overall_execution_log = {}
         try:
-            request_date_objects = pd.date_range(start_date_str, end_date_str)
+            start_date_obj = datetime.strptime(start_date_str, "%Y-%m-%d")
+            end_date_obj = datetime.strptime(end_date_str, "%Y-%m-%d")
+            request_date_objects = pd.date_range(start_date_obj, end_date_obj)
             request_date_range_str_list = [d.strftime("%Y-%m-%d") for d in request_date_objects]
-        except Exception as e:
+        except ValueError as e:
             print(f"錯誤 (hydrate_data_range): 無效的 start_date_str 或 end_date_str: {e}")
             overall_execution_log["error"] = f"Invalid date range: {start_date_str} to {end_date_str}. Details: {e}"
             return None, overall_execution_log
@@ -144,7 +147,42 @@ class YFinanceClient:
                 "status": "pending", "interval": None, "count": 0, "message": "Awaiting processing"
             })
 
-        for interval in self.FALLBACK_INTERVALS:
+        # --- 「智能考古」：存在性預檢 ---
+        # 僅對超過30天的歷史數據執行
+        if (end_date_obj - start_date_obj).days > 30:
+            print(f"INFO: hydrate_data_range: Ticker={ticker}. Performing existence pre-flight check for historical range [{start_date_str} to {end_date_str}] (requested >30 days).")
+            # 使用最粗顆粒度 '1mo' 請求整個範圍
+            # yfinance 的 end date 是 exclusive, 所以要加一天
+            preflight_end_date_str = (end_date_obj + timedelta(days=1)).strftime("%Y-%m-%d")
+            preflight_data = self.fetch_single_chunk(ticker, start_date_str, preflight_end_date_str, '1mo')
+            if preflight_data is None or preflight_data.empty:
+                print(f"INFO: Pre-flight check for {ticker} from {start_date_str} to {end_date_str} (1mo) failed. Skipping all intervals.")
+                for date_str_in_log_range in request_date_range_str_list:
+                    overall_execution_log[date_str_in_log_range][ticker].update({
+                        "status": "preflight_failed_empty",
+                        "interval": "1mo_preflight",
+                        "count": 0,
+                        "message": f"Pre-flight check for {ticker} over [{start_date_str}-{end_date_str}] returned no data with '1mo'. Assuming no data in this historical range."
+                    })
+                print(f"===== 數據回填任務結束 (預檢失敗): Ticker={ticker} =====")
+                return None, overall_execution_log
+            else:
+                print(f"INFO: Pre-flight check for {ticker} from {start_date_str} to {end_date_str} (1mo) successful. Proceeding with detailed fetch.")
+        # --- 結束 「存在性預檢」 ---
+
+        # --- 「智能考古」：時間感知回溯 ---
+        request_start_date_actual = start_date_obj.date()
+        thirty_days_ago_date = (datetime.now() - timedelta(days=30)).date()
+
+        current_fallback_intervals = self.FALLBACK_INTERVALS
+        if request_start_date_actual < thirty_days_ago_date:
+            print(f"INFO: hydrate_data_range: Ticker={ticker}. Request for historical data (start date {start_date_str} is older than 30 days). Using HISTORICAL_FALLBACK: {self.HISTORICAL_FALLBACK}")
+            current_fallback_intervals = self.HISTORICAL_FALLBACK
+        else:
+            print(f"INFO: hydrate_data_range: Ticker={ticker}. Request for recent data (start date {start_date_str} is within 30 days). Using FALLBACK_INTERVALS: {self.FALLBACK_INTERVALS}")
+        # --- 結束 「時間感知回溯」 ---
+
+        for interval in current_fallback_intervals:
             print(f"\nINFO: hydrate_data_range: Ticker={ticker}. 正在評估顆粒度 '{interval}' for range [{start_date_str} to {end_date_str}]...")
             chunk_size_days = self._get_chunk_size_for_interval(interval)
             if chunk_size_days <= 0: continue

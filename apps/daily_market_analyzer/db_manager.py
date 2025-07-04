@@ -15,19 +15,24 @@ class DBManager:
     提供方法來建立資料庫連線、建立資料表以及高效地寫入 (UPSERT) DataFrame 數據。
     此版本適用於 Daily Market Analyzer，處理包含 'interval' 欄位的數據，並提供查詢功能。
     """
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, duckdb_config: dict | None = None):
         """
         初始化 DBManager。
 
         Args:
             db_path (str): DuckDB 資料庫檔案的路徑。
+            duckdb_config (dict | None, optional): DuckDB 連線的配置選項。預設為 None。
         """
         self.db_path = db_path
+        self.duckdb_config = duckdb_config if duckdb_config else {} # 確保是字典以便合併
         db_dir = os.path.dirname(self.db_path)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir, exist_ok=True)
             print(f"INFO: 已建立資料庫目錄: {db_dir}")
-        print(f"INFO: DBManager (Daily Market Analyzer) 初始化完畢，資料庫路徑: {self.db_path}")
+
+        config_info = f"使用配置: {self.duckdb_config}" if self.duckdb_config else "使用預設配置"
+        print(f"INFO: DBManager (Daily Market Analyzer v33.0) 初始化完畢，資料庫路徑: {self.db_path}。{config_info}")
+
 
     def create_ohlcv_table(self, table_name: str = "market_ohlcv_analyzer"):
         """
@@ -49,7 +54,7 @@ class DBManager:
         );
         """
         try:
-            with duckdb.connect(self.db_path) as con:
+            with duckdb.connect(database=self.db_path, config=self.duckdb_config) as con:
                 con.execute(create_sql)
             print(f"INFO: 資料表 '{table_name}' 已在資料庫 '{self.db_path}' 中準備就緒 (包含 interval 欄位)。")
         except Exception as e:
@@ -115,7 +120,7 @@ class DBManager:
             return
 
         try:
-            with duckdb.connect(self.db_path) as con:
+            with duckdb.connect(database=self.db_path, config=self.duckdb_config) as con:
                 con.register('df_view_to_insert', df_to_insert)
                 columns_str = ", ".join(required_cols)
                 upsert_sql = f"INSERT OR REPLACE INTO {table_name} ({columns_str}) SELECT {columns_str} FROM df_view_to_insert"
@@ -141,7 +146,7 @@ class DBManager:
             WHERE ticker = ? AND datetime >= CAST(? AS TIMESTAMPTZ) AND datetime < CAST(? AS TIMESTAMPTZ)
             ORDER BY datetime ASC
             """
-            with duckdb.connect(self.db_path) as con:
+            with duckdb.connect(database=self.db_path, config=self.duckdb_config) as con:
                 result_df = con.execute(query, [ticker, start_of_day, start_of_next_day]).fetchdf()
 
             if not result_df.empty and 'datetime' in result_df.columns:
@@ -214,7 +219,7 @@ class DBManager:
         ORDER BY datetime ASC
         """
         try:
-            with duckdb.connect(self.db_path) as con:
+            with duckdb.connect(database=self.db_path, config=self.duckdb_config) as con:
                 result_df = con.execute(query, [ticker, interval, query_start_ts, query_end_ts]).fetchdf()
             if not result_df.empty and 'datetime' in result_df.columns:
                 result_df['datetime'] = pd.to_datetime(result_df['datetime'])
