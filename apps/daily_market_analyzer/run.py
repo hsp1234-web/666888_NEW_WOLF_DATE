@@ -15,6 +15,8 @@ import concurrent.futures
 from tqdm import tqdm
 import io
 import contextlib
+import multiprocessing
+import queue # For queue.Empty
 import psutil # <-- 第三戰區：導入 psutil
 
 # 設定專案路徑，確保可以正確匯入其他模組
@@ -257,39 +259,167 @@ def main():
         overall_execution_log_data = {}
         all_hydrated_dfs_data = []
 
-        print(f"INFO: 啟動聯合作戰模式，自動偵測並使用可用核心處理 {len(tickers_list_data)} 個標的。")
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            future_to_ticker = {
-                executor.submit(
-                    process_single_ticker,
-                    ticker, args.start_date, args.end_date, args.db_path, args.cache_db_path, args.table_name, args.force_refresh, args.verbose
-                ): ticker for ticker in tickers_list_data
-            }
-            for future in tqdm(concurrent.futures.as_completed(future_to_ticker), total=len(tickers_list_data), desc="數據聯合作戰引擎執行中"):
-                ticker = future_to_ticker[future]
-                try:
-                    hydrated_df_single, ticker_execution_log_single, worker_logs = future.result()
-                    if worker_logs and not args.verbose:
-                        pass
-                    if ticker_execution_log_single:
-                        for date_key, log_val_per_day in ticker_execution_log_single.items():
-                            if date_key not in overall_execution_log_data:
-                                overall_execution_log_data[date_key] = {}
-                            overall_execution_log_data[date_key].update(log_val_per_day)
-                    if hydrated_df_single is not None and not hydrated_df_single.empty:
-                        all_hydrated_dfs_data.append(hydrated_df_single)
-                    elif hydrated_df_single is None:
-                        print(f"資訊：標的 {ticker} 的平行處理任務未返回有效的 DataFrame。")
-                except Exception as exc:
-                    print(f"錯誤：處理標的 {ticker} 的平行任務時發生例外: {exc}")
-                    for date_str_in_range in pd.date_range(args.start_date, args.end_date).strftime('%Y-%m-%d'):
-                        overall_execution_log_data.setdefault(date_str_in_range, {}).setdefault(ticker, {
-                            "status": "parallel_task_exception", "message": f"平行任務執行失敗: {str(exc)}",
-                            "count": 0, "interval": None
-                        })
+        # --- 方案 A: 動態負載均衡 ---
+        # 使用 multiprocessing.Manager 來創建可在進程間共享的隊列
+        manager = multiprocessing.Manager()
+        task_queue = manager.Queue() # 用於存放待處理的股票代碼任務
+        result_queue = manager.Queue() # 用於從 worker 進程收集處理結果（或其元數據）
 
-        print("\n--- 所有平行數據回填任務完成，正在合併數據... ---")
+        # 將所有需要處理的股票代碼放入任務隊列
+        for ticker in tickers_list_data:
+            task_queue.put(ticker)
+
+        num_workers = os.cpu_count() or 4 # 根據系統 CPU 核心數決定 worker 數量，預設為4
+        print(f"INFO: 啟動動態負載均衡模式，使用 {num_workers} 個 worker 進程處理 {len(tickers_list_data)} 個標的。")
+
+        processes = []
+        for i in range(num_workers):
+            # 注意：這裡傳遞 args 物件的副本可能更安全，或者只傳遞需要的屬性
+            # 但對於方案A的初步實現，直接傳遞 args 也可以
+            p = multiprocessing.Process(target=dynamic_worker, args=(
+                task_queue, result_queue, args.start_date, args.end_date,
+                args.db_path, args.cache_db_path, args.table_name,
+                args.force_refresh, args.verbose, i # 傳入 worker_id 以供日誌區分
+            ))
+            processes.append(p)
+            p.start()
+
+        # 添加一個進度條來監控從結果隊列中收集結果的過程
+        pbar = tqdm(total=len(tickers_list_data), desc="動態負載數據處理中")
+
+        # 循環收集結果，直到所有任務的結果都被接收
+        # 每個 ticker 應該產生一個結果（成功或失敗的日誌）
+        for _ in range(len(tickers_list_data)):
+            try:
+                # 從結果隊列獲取 worker 的處理結果，設置較長超時以應對長時間運行的任務
+                result_item = result_queue.get(timeout=1800) # 超時30分鐘
+                pbar.update(1) # 每收到一個結果，進度條更新
+
+                res_ticker = result_item["ticker"] # 該結果對應的股票代碼
+                shm_meta = result_item["shm_meta"] # 共享記憶體元數據 (如果有的話)
+                ticker_execution_log_single = result_item["execution_log"] # 該股票的執行日誌
+                worker_logs = result_item["worker_logs_str"] # worker 的原始日誌字串 (如果有的話)
+                hydrated_df_single = None # 初始化將要重建的 DataFrame
+
+                if worker_logs and not args.verbose: # 如果有 worker 日誌且非詳細模式，可以選擇記錄到檔案
+                    pass # 例如: log_to_file(worker_logs)
+
+                # --- 方案 B: 處理共享記憶體數據 ---
+                if shm_meta: # 如果結果包含共享記憶體元數據，則嘗試重建 DataFrame
+                    shm_instance_main = None # 初始化共享記憶體實例變量
+                    try:
+                        if verbose_mode:
+                            print(f"--- [Main, Ticker:{res_ticker}] (詳細) 接收到共享記憶體元數據: {shm_meta['name']} ---")
+
+                        # 連接到由 worker 創建的共享記憶體區塊
+                        # 注意：此處的 name 必須與 worker 中創建時的 name 完全一致
+                        shm_instance_main = shared_memory.SharedMemory(name=shm_meta["name"])
+
+                        # 從共享記憶體緩衝區重建 NumPy 陣列
+                        # 使用 .copy() 確保數據從共享緩衝區複製到主進程的記憶體中，
+                        # 這樣即使後續共享記憶體被 unlink，主進程的數據副本依然存在。
+                        reconstructed_np_array = np.ndarray(
+                            shm_meta["shape"], dtype=shm_meta["dtype"], buffer=shm_instance_main.buf
+                        ).copy()
+
+                        # 將 NumPy 陣列轉換回 Pandas DataFrame，使用元數據中提供的數值欄位名
+                        temp_df = pd.DataFrame(reconstructed_np_array, columns=shm_meta["columns_numeric"])
+
+                        # 恢復 'datetime' 欄位：
+                        # worker 中已將 datetime 轉換為 int64 (nanoseconds since epoch, UTC naive)
+                        # 主進程需要將其轉換回 datetime64[ns] 並明確設置為 UTC 時區
+                        if 'datetime' in temp_df.columns and shm_meta["columns_numeric"][0] == 'datetime': # 確保是我們轉換的datetime
+                            temp_df['datetime'] = pd.to_datetime(temp_df['datetime'], unit='ns', utc=True)
+
+                        # 添加回 'ticker' 和 'interval' 欄位
+                        # 'ticker' 直接從 result_item 獲取
+                        # 'interval' 從 shm_meta 中獲取 (由 worker 添加)
+                        temp_df['ticker'] = res_ticker
+                        temp_df['interval'] = shm_meta.get("interval_value", "unknown_main_interval") # 如果 worker 未提供 interval，則標記
+
+                        # 可選：根據原始欄位順序重新排列 DataFrame 的欄位
+                        if "original_columns" in shm_meta:
+                            # 確保 reindex 時，新加入的 ticker 和 interval 欄位也被考慮
+                            # original_columns 應為最終 DataFrame 所需的完整欄位列表和順序
+                            final_cols_order = list(shm_meta["original_columns"]) # 複製一份以防修改原始元數據
+
+                            # 確保 ticker 和 interval 包含在最終欄位中 (如果它們不存在於 original_columns)
+                            if 'ticker' not in final_cols_order: final_cols_order.append('ticker')
+                            if 'interval' not in final_cols_order: final_cols_order.append('interval')
+
+                            # Reindex DataFrame，只保留 original_columns 中的欄位，並按其順序排列
+                            # 對於 original_columns 中有，但 temp_df (重建後) 中沒有的欄位，會被填充為 NaN (除非 fill_value 指定其他)
+                            # 由於我們是從原始 DataFrame 的欄位列表重建，理論上不應有缺失 (除了 ticker/interval)
+                            temp_df = temp_df.reindex(columns=final_cols_order)
+
+
+                        hydrated_df_single = temp_df # 將重建的 DataFrame 賦值給 hydrated_df_single
+                        if verbose_mode:
+                            print(f"--- [Main, Ticker:{res_ticker}] (詳細) 成功從共享記憶體 {shm_meta['name']} 重建 DataFrame，大小: {hydrated_df_single.shape} ---")
+
+                    except FileNotFoundError: # 如果共享記憶體區塊在連接前就被意外移除了
+                        print(f"錯誤: [Main, Ticker:{res_ticker}] 無法找到共享記憶體區塊: {shm_meta['name']}. 可能已被過早释放。")
+                    except Exception as e_shm_main: # 捕獲重建過程中的其他潛在錯誤
+                        print(f"錯誤: [Main, Ticker:{res_ticker}] 處理共享記憶體 {shm_meta.get('name', '未知SHM')} 時發生錯誤: {e_shm_main}")
+                    finally:
+                        # 無論成功與否，主進程都必須關閉其對共享記憶體的連接
+                        if shm_instance_main:
+                            shm_instance_main.close()
+                            # 主進程負責請求作業系統釋放（解除鏈接）共享記憶體區塊
+                            # 這應該在確認所有進程都不再需要它之後執行。
+                            # unlink() 使共享記憶體塊在所有已連接的進程都 close() 它之後被銷毀。
+                            shm_instance_main.unlink()
+                            if verbose_mode:
+                                print(f"--- [Main, Ticker:{res_ticker}] (詳細) 主進程已關閉並解除共享記憶體連接: {shm_meta['name']} ---")
+
+                # 處理執行日誌 (無論是否有共享記憶體數據)
+                if ticker_execution_log_single:
+                    for date_key, log_val_per_day in ticker_execution_log_single.items():
+                        if date_key not in overall_execution_log_data:
+                            overall_execution_log_data[date_key] = {}
+                        overall_execution_log_data[date_key].update(log_val_per_day)
+
+                # 將成功重建的 DataFrame 添加到列表中以供後續合併
+                if hydrated_df_single is not None and not hydrated_df_single.empty:
+                    all_hydrated_dfs_data.append(hydrated_df_single)
+                elif hydrated_df_single is None and shm_meta is not None: # 有元數據但重建失敗
+                    print(f"資訊：標的 {res_ticker} 有共享記憶體元數據但未能成功重建 DataFrame。")
+                elif hydrated_df_single is None and shm_meta is None: # Worker 未產生數據
+                    print(f"資訊：標的 {res_ticker} 的動態 worker 未產生共享記憶體數據 (可能無數據或處理失敗)。")
+
+            except queue.Empty: # 如果在超時時間內 result_queue 仍為空
+                print("警告：從結果隊列獲取結果超時。可能某些 worker 未能完成或所有任務已處理完畢但結果少於預期。")
+                break
+            except Exception as exc:
+                print(f"錯誤：主進程在處理 result_queue 中的項目時發生例外: {exc}")
+                # 嘗試安全地更新進度條，即使有錯誤
+                # pbar.update(1) # 移到 result_queue.get 之後立即執行
+
+        pbar.close()
+
+        # 確保所有worker進程都已結束，釋放所有隊列資源
+        for p in processes:
+            p.join(timeout=60) # 給予worker一些時間來完成隊列操作和關閉
+            if p.is_alive():
+                print(f"警告: Worker 進程 {p.pid} 在 join 超時後仍存活，嘗試終止。")
+                p.terminate()
+                p.join()
+
+
+        print("\n--- 所有動態 worker 進程處理完成，正在合併數據... ---")
         if all_hydrated_dfs_data:
+            # 在合併前，確保所有 DataFrame 的 'datetime' 欄位都是 tz-aware UTC
+            # 因為 process_single_ticker 返回的 df['datetime'] 是 UTC 的
+            # 而共享記憶體重建時也設定為 UTC
+            for i, df_item in enumerate(all_hydrated_dfs_data):
+                if 'datetime' in df_item.columns and pd.api.types.is_datetime64_any_dtype(df_item['datetime']):
+                    if df_item['datetime'].dt.tz is None:
+                        print(f"警告: 合併前發現 DataFrame {i} 的 datetime 欄位是 naive，將其本地化到 UTC。")
+                        all_hydrated_dfs_data[i]['datetime'] = df_item['datetime'].dt.tz_localize('UTC')
+                    elif str(df_item['datetime'].dt.tz) != 'UTC':
+                        print(f"警告: 合併前發現 DataFrame {i} 的 datetime 欄位時區為 {df_item['datetime'].dt.tz}，將其轉換到 UTC。")
+                        all_hydrated_dfs_data[i]['datetime'] = df_item['datetime'].dt.tz_convert('UTC')
+
             final_master_df = pd.concat(all_hydrated_dfs_data, ignore_index=True)
             if not final_master_df.empty:
                 print(f"INFO: 數據合併完成，總共 {len(final_master_df)} 筆數據。準備一次性寫入主分析資料庫 '{args.db_path}'...")
@@ -432,3 +562,147 @@ if __name__ == "__main__":
     #         print(f"ERROR: Late ModuleNotFoundError in daily_market_analyzer __main__: {e}") # 中文化
 
     main()
+
+from multiprocessing import shared_memory # 方案 B
+import numpy as np # 方案 B
+import uuid # 方案 B
+
+# --- dynamic_worker 函數定義 ---
+def dynamic_worker(task_queue: multiprocessing.Queue, result_queue: multiprocessing.Queue,
+                   start_date: str, end_date: str, db_path: str, cache_db_path: str,
+                   table_name: str, force_refresh: bool, verbose_mode: bool, worker_id: int):
+    """
+    動態 worker 函數，從任務隊列中獲取標的進行處理。
+    如果處理成功且有數據，則將數據寫入共享記憶體，並將元數據放入結果隊列。
+    """
+    if verbose_mode:
+        print(f"--- [WorkerID:{worker_id}] 動態 Worker 啟動 (共享記憶體模式) ---")
+
+    # 定義預期從 process_single_ticker 返回的 DataFrame 中的欄位，特別是那些將放入共享記憶體的數值型欄位
+    # 以及 datetime 欄位（它會被特殊處理）
+    numeric_cols_for_shm = ['datetime', 'open', 'high', 'low', 'close', 'volume']
+
+    while True:
+        shm_name_local = None  # 當前 worker 創建的共享記憶體名稱
+        shm_instance_local = None  # 當前 worker 的共享記憶體實例
+        processed_ticker = "未設定"  # 初始化，用於錯誤日誌
+
+        try:
+            # 從任務隊列中非阻塞地獲取一個股票代碼進行處理
+            ticker = task_queue.get_nowait()
+            processed_ticker = ticker # 更新當前處理的股票代碼
+            if verbose_mode:
+                print(f"--- [WorkerID:{worker_id}] (詳細) Worker 取得任務: {ticker} ---")
+
+            # 調用核心處理函數獲取數據
+            hydrated_df, execution_log, worker_logs_str = process_single_ticker(
+                ticker, start_date, end_date, db_path, cache_db_path,
+                table_name, force_refresh, verbose_mode
+            )
+
+            shm_meta = None # 初始化共享記憶體元數據為 None
+
+            # --- 方案 B: 共享記憶體處理 ---
+            if hydrated_df is not None and not hydrated_df.empty:
+                # 如果獲取到的 DataFrame 非空，則準備將其內容放入共享記憶體
+                if verbose_mode:
+                    print(f"--- [WorkerID:{worker_id}, Ticker:{ticker}] (詳細) 數據獲取成功 ({len(hydrated_df)} 行)，準備寫入共享記憶體... ---")
+
+                original_df_columns = list(hydrated_df.columns) # 保存原始 DataFrame 的所有欄位名
+
+                # 1. 特殊處理 'datetime' 欄位：
+                #    Pandas 的 datetime64[ns, UTC] 類型直接轉 NumPy 可能不理想或帶有時區信息不易共享。
+                #    將其轉換為 UTC-naive (移除時區信息，但值仍代表UTC時間點)，然後轉為 int64 (nanoseconds since epoch)。
+                #    主進程恢復時，將 int64 轉回 datetime64[ns] 並重新賦予 UTC 時區。
+                if pd.api.types.is_datetime64_any_dtype(hydrated_df['datetime']):
+                    if hydrated_df['datetime'].dt.tz is not None: # 如果有時區
+                        hydrated_df['datetime'] = hydrated_df['datetime'].dt.tz_convert('UTC').dt.tz_localize(None)
+                    hydrated_df['datetime'] = hydrated_df['datetime'].astype(np.int64) # 轉換為 int64
+
+                # 2. 準備要放入共享記憶體的 NumPy 陣列：
+                #    只包含數值型欄位和已轉換為 int64 的 datetime 欄位。
+                #    'ticker' 和 'interval' (通常是字串/object類型) 不直接放入 NumPy 陣列以避免複雜性，
+                #    它們將作為元數據傳遞，由主進程在重建 DataFrame 時重新添加。
+                data_for_shm_numpy = hydrated_df[numeric_cols_for_shm].to_numpy()
+
+                # 3. 創建共享記憶體區塊：
+                #    - `name`: 生成一個唯一的名稱。
+                #    - `create=True`: 指示創建新的共享記憶體區塊。
+                #    - `size`: NumPy 陣列所需的總字節數。
+                shm_name_local = f"shm_DMA_{worker_id}_{uuid.uuid4().hex}" # 確保名稱唯一
+                shm_instance_local = shared_memory.SharedMemory(name=shm_name_local, create=True, size=data_for_shm_numpy.nbytes)
+
+                # 4. 將數據複製到共享記憶體：
+                #    創建一個 NumPy 陣列視圖，其緩衝區指向共享記憶體。
+                shared_array_view_worker = np.ndarray(data_for_shm_numpy.shape, dtype=data_for_shm_numpy.dtype, buffer=shm_instance_local.buf)
+                shared_array_view_worker[:] = data_for_shm_numpy[:] # 複製數據到共享記憶體
+
+                # 5. 準備共享記憶體的元數據，用於主進程重建 DataFrame：
+                shm_meta = {
+                    "name": shm_name_local,                         # 共享記憶體名稱
+                    "shape": data_for_shm_numpy.shape,             # NumPy 陣列的形狀
+                    "dtype": data_for_shm_numpy.dtype.name,        # NumPy 陣列的數據類型 (字串形式)
+                    "columns_numeric": numeric_cols_for_shm,       # 存入共享記憶體的欄位名列表
+                    "original_columns": original_df_columns,       # 原始 DataFrame 的完整欄位名列表
+                    "interval_value": hydrated_df['interval'].iloc[0] if 'interval' in hydrated_df.columns and not hydrated_df.empty else "unknown_worker_interval" # 提取 interval 值
+                }
+                if verbose_mode:
+                    print(f"--- [WorkerID:{worker_id}, Ticker:{ticker}] (詳細) 數據已寫入共享記憶體: {shm_name_local}, Interval: {shm_meta['interval_value']} ---")
+            else: # 如果 hydrated_df 為空或 None
+                if verbose_mode:
+                    print(f"--- [WorkerID:{worker_id}, Ticker:{ticker}] (詳細) 無數據返回，不使用共享記憶體。 ---")
+
+            # 將處理結果（包含 ticker、可能的共享記憶體元數據、執行日誌等）放入結果隊列
+            result_queue.put({
+                "ticker": ticker,
+                "shm_meta": shm_meta, # 如果無數據則為 None
+                "execution_log": execution_log,
+                "worker_logs_str": worker_logs_str
+            })
+
+            if verbose_mode:
+                print(f"--- [WorkerID:{worker_id}, Ticker:{ticker}] (詳細) Worker 完成任務，已將元數據/結果放入隊列 ---")
+
+        except queue.Empty: # 如果任務隊列已空
+            if verbose_mode:
+                print(f"--- [WorkerID:{worker_id}] (詳細) 任務隊列已空，Worker 準備退出 ---")
+            break # 正常退出循環
+        except Exception as e: # 捕獲處理單個 ticker 時發生的所有其他異常
+            print(f"--- [WorkerID:{worker_id}, Ticker:{processed_ticker}] (詳細) Worker 處理任務時發生嚴重錯誤: {type(e).__name__} - {e} ---")
+            # 構建錯誤日誌，以便主進程知道此任務失敗
+            error_log_for_worker_failure = {}
+            temp_date_obj_worker = datetime.strptime(start_date, "%Y-%m-%d") # 需要 start_date 在作用域內
+            end_date_obj_worker = datetime.strptime(end_date, "%Y-%m-%d")   # 需要 end_date 在作用域內
+            current_date_obj_worker = temp_date_obj_worker
+            from datetime import timedelta # 確保 timedelta 可用
+            while current_date_obj_worker <= end_date_obj_worker:
+                date_str = current_date_obj_worker.strftime("%Y-%m-%d")
+                error_log_for_worker_failure.setdefault(date_str, {}).setdefault(processed_ticker, { # 使用 processed_ticker
+                    "status": "dynamic_worker_shm_exception", # 標記為 worker 級別的共享記憶體相關異常
+                    "message": f"WorkerID {worker_id} (Ticker: {processed_ticker}) 發生嚴重錯誤: {type(e).__name__} - {str(e)}",
+                    "count": 0, "interval": None
+                })
+                current_date_obj_worker += timedelta(days=1)
+
+            # 即使發生錯誤，也要向結果隊列發送一個條目，表明此任務已嘗試處理
+            result_queue.put({
+                "ticker": processed_ticker, # 發送實際處理的 ticker
+                "shm_meta": None, # 無共享記憶體數據
+                "execution_log": error_log_for_worker_failure, # 發送錯誤日誌
+                "worker_logs_str": f"WorkerID {worker_id} (Ticker: {processed_ticker}) Error: {type(e).__name__} - {e}"
+            })
+            # 決定是否在錯誤後中斷 worker。如果錯誤是可恢復的或特定於某個 ticker 的，可以考慮 continue。
+            # 但對於未知嚴重錯誤，中斷可能是更安全的選擇，以防污染後續任務或資源。
+            break
+        finally:
+            # Worker 進程在完成（或失敗）一個任務後，如果創建了共享記憶體實例，
+            # 必須 close() 它對該共享記憶體的連接。
+            # 注意：worker 不應調用 unlink()。unlink() 由主進程在確認數據已完全處理後調用。
+            if shm_instance_local:
+                shm_instance_local.close()
+                if verbose_mode:
+                    print(f"--- [WorkerID:{worker_id}, Ticker:{processed_ticker}] (詳細) Worker 已關閉其共享記憶體連接: {shm_name_local if shm_name_local else '無名稱'} ---")
+
+
+    if verbose_mode:
+        print(f"--- [WorkerID:{worker_id}] 動態 Worker (共享記憶體模式) 正常結束 ---")
