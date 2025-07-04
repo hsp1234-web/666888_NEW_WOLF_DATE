@@ -123,7 +123,8 @@ def transform_and_load(raw_content_df: pd.DataFrame, target_conn: duckdb.DuckDBP
             else:
                 logger.debug(f"'交易日期' series for {source_file}/{member_file}:\n{trading_date_series.to_string()}")
 
-            parsed_dates_series = pd.to_datetime(trading_date_series, format='%Y/%m/%d', errors='coerce').dt.date
+            # 精準指令：指定 YYYYMMDD 格式
+            parsed_dates_series = pd.to_datetime(trading_date_series, format='%Y%m%d', errors='coerce').dt.date
             logger.debug(f"parsed_dates_series for {source_file}/{member_file}:\n{parsed_dates_series.to_string()}")
 
             df['parsed_trading_date'] = parsed_dates_series
