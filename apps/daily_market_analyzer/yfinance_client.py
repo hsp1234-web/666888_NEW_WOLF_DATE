@@ -164,6 +164,7 @@ class YFinanceClient:
                         "count": 0,
                         "message": f"Pre-flight check for {ticker} over [{start_date_str}-{end_date_str}] returned no data with '1mo'. Assuming no data in this historical range."
                     })
+                # print(f"DEBUG: PREFLIGHT FAILED, ATTEMPTING TO RETURN NOW FOR TICKER {ticker}") # 移除調試日誌
                 print(f"===== 數據回填任務結束 (預檢失敗): Ticker={ticker} =====")
                 return None, overall_execution_log
             else:

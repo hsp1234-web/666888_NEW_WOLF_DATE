@@ -1,0 +1,206 @@
+[2025-07-04 02:19:13] 測試腳本 _test_v33_harness.py 開始執行。日誌將記錄於: /app/data_workspace/_test_v33_harness.log
+[2025-07-04 02:19:13] Python 解譯器: /home/jules/.pyenv/versions/3.12.11/bin/python
+[2025-07-04 02:19:13] 待測腳本: /app/apps/daily_market_analyzer/run.py
+[2025-07-04 02:19:13] 測試資料庫: /app/data_workspace/test_v33_analyzer.duckdb
+[2025-07-04 02:19:13] 報告目錄: /app/data_workspace/reports
+[2025-07-04 02:19:13] 測試表格: market_ohlcv_data_test_v33
+[2025-07-04 02:19:13] 開始執行測試 (1/4): test_1_invalid_historical_data
+[2025-07-04 02:19:13] 已刪除測試資料庫: /app/data_workspace/test_v33_analyzer.duckdb
+[2025-07-04 02:19:13] 已刪除測試報告檔案: /app/data_workspace/reports/market_analysis_report_20250704_021857.md
+[2025-07-04 02:19:13] 清理完成。
+[2025-07-04 02:19:13] 執行命令: /home/jules/.pyenv/versions/3.12.11/bin/python /app/apps/daily_market_analyzer/run.py --tickers GOOG --start-date 2000-01-01 --end-date 2000-02-15 --db-path /app/data_workspace/test_v33_analyzer.duckdb --table-name market_ohlcv_data_test_v33 --data-only
+[2025-07-04 02:19:15] 命令返回碼: 0
+[2025-07-04 02:19:15] 標準輸出:
+1d', '1wk', '1mo'], 歷史 Fallback: ['1d', '1wk', '1mo']
+
+--- 開始數據處理流程 ---
+INFO: 資料表 'market_ohlcv_data_test_v33' 已在資料庫 '/app/data_workspace/test_v33_analyzer.duckdb' 中準備就緒 (包含 interval 欄位)。
+
+--- 開始處理標的 (數據流程): GOOG ---
+===== 開始數據回填任務 (v33.0 Intelligent Hound): Ticker=GOOG, Range=[2000-01-01 to 2000-02-15], ForceRefresh=False =====
+INFO: hydrate_data_range: Ticker=GOOG. Performing existence pre-flight check for historical range [2000-01-01 to 2000-02-15] (requested >30 days).
+INFO: fetch_single_chunk: Ticker=GOOG, Interval=1mo, Start=2000-01-01, End(Exclusive)=2000-02-16
+警告: fetch_single_chunk: GOOG 在 2000-01-01 到 2000-02-16 (間隔: 1mo) 無數據返回。
+INFO: Pre-flight check for GOOG from 2000-01-01 to 2000-02-15 (1mo) failed. Skipping all intervals.
+DEBUG: PREFLIGHT FAILED, ATTEMPTING TO RETURN NOW FOR TICKER GOOG
+===== 數據回填任務結束 (預檢失敗): Ticker=GOOG =====
+資訊：標的 GOOG 未擷取到任何數據。
+--- 標的 (數據流程): GOOG 處理完畢 ---
+
+--- 數據處理流程結束 ---
+數據流程執行時長: 0.45 秒
+
+--- 總任務執行完畢 ---
+總體結束時間: 2025-07-04 02:19:14
+腳本總執行時長: 0.45 秒
+... (輸出過長，已截斷)
+[2025-07-04 02:19:15] 標準錯誤:
+$GOOG: possibly delisted; no price data found  (1mo 2000-01-01 -> 2000-02-16) (Yahoo error = "Data doesn't exist for startDate = 946702800, endDate = 950677200")
+
+[2025-07-04 02:19:15] 測試 1: 命令執行成功。
+[2025-07-04 02:19:15] 測試 1: 日誌包含預檢失敗訊息。
+[2025-07-04 02:19:15] 檢查日誌 (不區分大小寫): 找到非預期字串 'fetch_single_chunk: Ticker=GOOG, Interval=1m'
+[2025-07-04 02:19:15] 測試 (1/4): test_1_invalid_historical_data 失敗 (斷言錯誤): 測試 1 失敗: 日誌中包含多餘的 interval 嘗試記錄。
+[2025-07-04 02:19:15] Traceback (most recent call last):
+  File "/app/apps/daily_market_analyzer/_test_v33_harness.py", line 424, in <module>
+    if test_func():
+       ^^^^^^^^^^^
+  File "/app/apps/daily_market_analyzer/_test_v33_harness.py", line 197, in test_1_invalid_historical_data
+    assert check_log_not_contains(stdout, unexpected_in_log_actual, case_sensitive=False), "測試 1 失敗: 日誌中包含多餘的 interval 嘗試記錄。"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 測試 1 失敗: 日誌中包含多餘的 interval 嘗試記錄。
+
+[2025-07-04 02:19:15] 開始執行測試 (2/4): test_2_data_only_mode
+[2025-07-04 02:19:15] 已刪除測試資料庫: /app/data_workspace/test_v33_analyzer.duckdb
+[2025-07-04 02:19:15] 清理完成。
+[2025-07-04 02:19:15] 執行命令: /home/jules/.pyenv/versions/3.12.11/bin/python /app/apps/daily_market_analyzer/run.py --tickers MSFT --start-date 2025-06-29 --end-date 2025-07-03 --db-path /app/data_workspace/test_v33_analyzer.duckdb --table-name market_ohlcv_data_test_v33 --data-only
+[2025-07-04 02:19:17] 命令返回碼: 0
+[2025-07-04 02:19:17] 標準輸出:
+7-03')]
+INFO: hydrate_data_range: Ticker=MSFT, Interval=1m. Fetching missing range 1/1: [2025-06-29 to 2025-07-03]
+INFO: hydrate_data_range: Ticker=MSFT, Interval=1m. Processing chunk 1/1 for missing range: [2025-06-29 to 2025-07-04 exclusive]
+INFO: fetch_single_chunk: Ticker=MSFT, Interval=1m, Start=2025-06-29, End(Exclusive)=2025-07-04
+INFO: fetch_single_chunk: 成功獲取並標準化 1374 筆數據。
+INFO: hydrate_data_range: Ticker=MSFT, Interval=1m. Storing 1374 newly fetched rows for range [2025-06-29-2025-07-03] to DB.
+INFO: 成功將 1374 筆來自 'MSFT' (顆粒度: 1m) 的數據寫入/更新至資料表 'market_ohlcv_data_test_v33'。
+成功: hydrate_data_range: Ticker=MSFT, Interval=1m. 已完成數據回填 [2025-06-29 to 2025-07-03]。最終共 1374 筆。
+===== 數據回填任務結束 (成功): Ticker=MSFT, Interval=1m =====
+資訊：標的 MSFT 成功擷取 1374 筆數據。準備寫入資料庫...
+INFO: 成功將 1374 筆來自 'MSFT' (顆粒度: 1m) 的數據寫入/更新至資料表 'market_ohlcv_data_test_v33'。
+資訊：標的 MSFT 數據成功寫入資料庫。
+--- 標的 (數據流程): MSFT 處理完畢 ---
+
+--- 數據處理流程結束 ---
+數據流程執行時長: 0.58 秒
+
+--- 總任務執行完畢 ---
+總體結束時間: 2025-07-04 02:19:16
+腳本總執行時長: 0.58 秒
+... (輸出過長，已截斷)
+[2025-07-04 02:19:17] 測試 2: 命令執行成功。
+[2025-07-04 02:19:17] 測試 2: 日誌包含數據處理成功訊息。
+[2025-07-04 02:19:17] DuckDB 查詢: SELECT COUNT(*) FROM market_ohlcv_data_test_v33 WHERE ticker = 'MSFT' AND datetime >= '2025-06-29' AND datetime <= '2025-07-03 23:59:59' (參數: None) -> 返回 1 行
+[2025-07-04 02:19:17] 測試 2: 資料庫中已寫入 MSFT 的數據 (1374 筆)。
+[2025-07-04 02:19:17] 測試 2: 未生成報告檔案。測試通過！
+[2025-07-04 02:19:17] 測試 (2/4): test_2_data_only_mode 通過。
+[2025-07-04 02:19:17] 開始執行測試 (3/4): test_3_report_only_mode
+[2025-07-04 02:19:17] 執行命令: /home/jules/.pyenv/versions/3.12.11/bin/python /app/apps/daily_market_analyzer/run.py --tickers MSFT --report-start-date 2025-06-29 --report-end-date 2025-07-03 --db-path /app/data_workspace/test_v33_analyzer.duckdb --table-name market_ohlcv_data_test_v33 --report-only
+[2025-07-04 02:19:18] 命令返回碼: 0
+[2025-07-04 02:19:18] 標準輸出:
+初始化完畢。
+INFO (run_report_generation): Generating report for tickers: ['MSFT'] over range [2025-06-29 to 2025-07-03]
+資訊 (AnalysisEngine): 正在為日期 2025-07-03 分析選擇權數據 (模擬)。
+資訊 (AnalysisEngine): 正在為日期 2025-07-02 分析選擇權數據 (模擬)。
+資訊 (AnalysisEngine): 正在為日期 2025-07-01 分析選擇權數據 (模擬)。
+資訊 (AnalysisEngine): 正在為日期 2025-06-30 分析選擇權數據 (模擬)。
+資訊 (AnalysisEngine): 正在為日期 2025-06-29 分析選擇權數據 (模擬)。
+
+--- 市場分析報告內容預覽 ---
+# 數據回填與市場分析報告
+
+## 任務總結
+- **執行時間**: 2025-07-04 02:19:18 UTC
+- **分析範圍**: 2025-06-29 至 2025-07-03
+- **分析標的**: MSFT
+- **總結**: 未能為任何目標標的成功獲取數據。 未獲取到有效數據顆粒度。
+
+---
+
+---
+
+
+## 🗓️ 2025-07-03
+
+#### 📜 本日數據盤點 (Data Inventory)
+❔ **MSFT**: 無當日處理記錄. *(註：可能當日未執行處理、無數據或過程被跳過)*
+
+#### 📊 本日市場快照 (Market Snapshot)
+
+- 今日無成功獲取數據之標的以供市場快照分析。
+
+
+#### 📈 選擇權市場情緒 (Options Market Sentiment)
+- 日期 2025-07-03 無可用選擇權數據進行分析。
+
+---
+
+
+## 🗓️ 2025-07-02
+... (報告內容過長，已截斷預覽) ...
+
+報告已成功儲存至：data_workspace/reports/on_demand_report_20250704_021918.md
+報告生成流程執行時長: 0.00 秒
+--- 報告生成流程結束 ---
+
+--- 總任務執行完畢 ---
+總體結束時間: 2025-07-04 02:19:18
+腳本總執行時長: 0.00 秒
+... (輸出過長，已截斷)
+[2025-07-04 02:19:18] 測試 3: 命令執行成功。
+[2025-07-04 02:19:18] 測試 3: 日誌包含報告生成成功訊息。
+[2025-07-04 02:19:18] 測試 3: 日誌未包含數據獲取相關訊息。
+[2025-07-04 02:19:18] 測試 3: 成功生成報告檔案。測試通過！
+[2025-07-04 02:19:18] 測試 (3/4): test_3_report_only_mode 通過。
+[2025-07-04 02:19:19] 開始執行測試 (4/4): test_4_full_flow
+[2025-07-04 02:19:19] 已刪除測試資料庫: /app/data_workspace/test_v33_analyzer.duckdb
+[2025-07-04 02:19:19] 已刪除測試報告檔案: /app/data_workspace/reports/on_demand_report_20250704_021918.md
+[2025-07-04 02:19:19] 清理完成。
+[2025-07-04 02:19:19] 執行命令: /home/jules/.pyenv/versions/3.12.11/bin/python /app/apps/daily_market_analyzer/run.py --tickers NVDA --start-date 2025-07-01 --end-date 2025-07-03 --db-path /app/data_workspace/test_v33_analyzer.duckdb --table-name market_ohlcv_data_test_v33
+[2025-07-04 02:19:21] 命令返回碼: 0
+[2025-07-04 02:19:21] 標準輸出:
+rator) 初始化完畢。
+INFO (run_report_generation): Generating report for tickers: ['NVDA'] over range [2025-07-01 to 2025-07-03]
+資訊 (AnalysisEngine): 正在為日期 2025-07-03 分析選擇權數據 (模擬)。
+資訊 (AnalysisEngine): 正在為日期 2025-07-02 分析選擇權數據 (模擬)。
+資訊 (AnalysisEngine): 正在為日期 2025-07-01 分析選擇權數據 (模擬)。
+
+--- 市場分析報告內容預覽 ---
+# 數據回填與市場分析報告
+
+## 任務總結
+- **執行時間**: 2025-07-04 02:19:20 UTC
+- **分析範圍**: 2025-07-01 至 2025-07-03
+- **分析標的**: NVDA
+- **總結**: 成功為所有 1 個標的獲取數據。 主要獲取到的數據顆粒度包括：1m。
+
+---
+
+---
+
+
+## 🗓️ 2025-07-03
+
+#### 📜 本日數據盤點 (Data Inventory)
+✅ **NVDA**: 成功獲取 **1m** 數據 (206 筆).
+
+#### 📊 本日市場快照 (Market Snapshot)
+
+| 標的 | 收盤價 | 漲跌% | 日內波幅% | 成交量 | 市場解讀 |
+|:---|:---:|:---:|:---:|:---:|:---|
+| **NVDA** | 159.27 | +1.29% | 2.03% | 129,142,917 | 市場常規波動。 |
+
+#### 📈 選擇權市場情緒 (Options Market Sentiment)
+- 日期 2025-07-03 無可用選擇權數據進行分析。
+
+---
+
+
+... (報告內容過長，已截斷預覽) ...
+
+報告已成功儲存至：data_workspace/reports/market_analysis_report_20250704_021920.md
+報告生成流程執行時長: 0.67 秒
+--- 報告生成流程結束 ---
+
+--- 總任務執行完畢 ---
+總體結束時間: 2025-07-04 02:19:21
+腳本總執行時長: 1.13 秒
+... (輸出過長，已截斷)
+[2025-07-04 02:19:21] 測試 4: 命令執行成功。
+[2025-07-04 02:19:21] 測試 4: 日誌包含完整流程成功訊息。
+[2025-07-04 02:19:21] DuckDB 查詢: SELECT COUNT(*) FROM market_ohlcv_data_test_v33 WHERE ticker = 'NVDA' AND datetime >= '2025-07-01' AND datetime <= '2025-07-03 23:59:59' (參數: None) -> 返回 1 行
+[2025-07-04 02:19:21] 測試 4: 資料庫中已寫入 NVDA 的數據 (980 筆)。
+[2025-07-04 02:19:21] 測試 4: 成功生成報告檔案。測試通過！
+[2025-07-04 02:19:21] 測試 (4/4): test_4_full_flow 通過。
+[2025-07-04 02:19:21] 總共規劃測試: 4
+[2025-07-04 02:19:21] 通過測試數: 3
+[2025-07-04 02:19:21] v33.0 整合測試未完全通過 (3/4)。請檢查日誌 '/app/data_workspace/_test_v33_harness.log'。

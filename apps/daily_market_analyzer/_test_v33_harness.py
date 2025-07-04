@@ -23,7 +23,7 @@ LOG_FILE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.
 # 測試股票和日期
 TICKER_INVALID_HISTORICAL = "GOOG"
 START_DATE_INVALID_HISTORICAL = "2000-01-01"
-END_DATE_INVALID_HISTORICAL = "2000-01-05"
+END_DATE_INVALID_HISTORICAL = "2000-02-15" # 擴大日期範圍以觸發 >30 天的預檢邏輯
 
 TICKER_DATA_ONLY = "MSFT"
 END_DATE_DATA_ONLY_REPORT_ONLY = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -158,11 +158,11 @@ def test_1_invalid_historical_data():
     # 我們需要根據實際輸出來調整 expected_in_log
 
     # 更新為更精確的預期日誌 (基於 yfinance_client.py 的實現)
+    # overall_execution_log 的內部狀態不會直接打印到 stdout，所以不檢查 status 和 message JSON 片段
     expected_in_log_actual = [
         f"Performing existence pre-flight check for historical range [{START_DATE_INVALID_HISTORICAL} to {END_DATE_INVALID_HISTORICAL}]",
         f"INFO: Pre-flight check for {TICKER_INVALID_HISTORICAL} from {START_DATE_INVALID_HISTORICAL} to {END_DATE_INVALID_HISTORICAL} (1mo) failed. Skipping all intervals.",
-        f"status\": \"preflight_failed_empty", # JSON log part
-        f"message\": \"Pre-flight check for {TICKER_INVALID_HISTORICAL} over [{START_DATE_INVALID_HISTORICAL}-{END_DATE_INVALID_HISTORICAL}] returned no data with '1mo'"
+        f"===== 數據回填任務結束 (預檢失敗): Ticker={TICKER_INVALID_HISTORICAL} =====" # 修正為匹配 yfinance_client.py 的中文輸出
     ]
 
     assert check_log_contains(stdout, expected_in_log_actual, case_sensitive=False), "測試 1 失敗: 日誌未包含預檢失敗的關鍵訊息。"
@@ -183,19 +183,40 @@ def test_1_invalid_historical_data():
     # 調整 unexpected_in_log 以反映 yfinance_client 的實際日誌輸出
     # 如果預檢失敗，hydrate_data_range 會提前退出，不會進入 fallback interval 循環。
     # 所以，不應該看到 "正在評估顆粒度" for '1d', '1h', '1m' for the main hydration loop.
-    unexpected_in_log_actual = [
+    # unexpected_in_log_actual = [ # 舊的檢查，會檢查整個 stdout
+    #     f"INFO: hydrate_data_range: Ticker={TICKER_INVALID_HISTORICAL}. 正在評估顆粒度 '1d'",
+    #     f"INFO: hydrate_data_range: Ticker={TICKER_INVALID_HISTORICAL}. 正在評估顆粒度 '1h'",
+    #     f"INFO: hydrate_data_range: Ticker={TICKER_INVALID_HISTORICAL}. 正在評估顆粒度 '1m'",
+    #     f"fetch_single_chunk: Ticker={TICKER_INVALID_HISTORICAL}, Interval=1d",
+    #     f"fetch_single_chunk: Ticker={TICKER_INVALID_HISTORICAL}, Interval=1h",
+    #     f"fetch_single_chunk: Ticker={TICKER_INVALID_HISTORICAL}, Interval=1m",
+    # ]
+    # assert check_log_not_contains(stdout, unexpected_in_log_actual, case_sensitive=False), "測試 1 失敗: 日誌中包含多餘的 interval 嘗試記錄。"
+    # log_message("測試 1: 日誌未包含多餘的 interval 嘗試。")
+
+    # --- 新增的更精確的檢查 ---
+    pre_flight_failed_marker = f"INFO: Pre-flight check for {TICKER_INVALID_HISTORICAL} from {START_DATE_INVALID_HISTORICAL} to {END_DATE_INVALID_HISTORICAL} (1mo) failed. Skipping all intervals."
+    marker_index = stdout.find(pre_flight_failed_marker)
+
+    assert marker_index != -1, f"測試 1 失敗: 未在日誌中找到預檢失敗標記 '{pre_flight_failed_marker}'"
+    log_message(f"測試 1: 在日誌中找到預檢失敗標記: '{pre_flight_failed_marker}'")
+
+    # 只檢查標記之後的日誌內容
+    stdout_after_marker = stdout[marker_index + len(pre_flight_failed_marker):]
+
+    unexpected_strings_after_preflight_failure = [
         f"INFO: hydrate_data_range: Ticker={TICKER_INVALID_HISTORICAL}. 正在評估顆粒度 '1d'",
         f"INFO: hydrate_data_range: Ticker={TICKER_INVALID_HISTORICAL}. 正在評估顆粒度 '1h'",
         f"INFO: hydrate_data_range: Ticker={TICKER_INVALID_HISTORICAL}. 正在評估顆粒度 '1m'",
-        # fetch_single_chunk for '1mo' is part of pre-flight, so it's expected.
-        # We should not see fetch_single_chunk for other intervals after pre-flight failure.
-        f"fetch_single_chunk: Ticker={TICKER_INVALID_HISTORICAL}, Interval=1d", # 這是 yf_client 內部的日誌
+        f"fetch_single_chunk: Ticker={TICKER_INVALID_HISTORICAL}, Interval=1d",
         f"fetch_single_chunk: Ticker={TICKER_INVALID_HISTORICAL}, Interval=1h",
         f"fetch_single_chunk: Ticker={TICKER_INVALID_HISTORICAL}, Interval=1m",
     ]
 
-    assert check_log_not_contains(stdout, unexpected_in_log_actual, case_sensitive=False), "測試 1 失敗: 日誌中包含多餘的 interval 嘗試記錄。"
-    log_message("測試 1: 日誌未包含多餘的 interval 嘗試。")
+    assert check_log_not_contains(stdout_after_marker, unexpected_strings_after_preflight_failure, case_sensitive=False), \
+        "測試 1 失敗: 在預檢失敗標記之後的日誌中發現了多餘的 interval 嘗試記錄。"
+    log_message("測試 1: 預檢失敗後未進行多餘的 interval 嘗試。")
+    # --- 結束新增的檢查 ---
 
     db_data = query_duckdb(BASE_DB_PATH, f"SELECT COUNT(*) FROM {TABLE_NAME} WHERE ticker = '{TICKER_INVALID_HISTORICAL}' AND datetime >= '{START_DATE_INVALID_HISTORICAL}' AND datetime <= '{END_DATE_INVALID_HISTORICAL} 23:59:59'")
     assert db_data['count_star()'].iloc[0] == 0, f"測試 1 失敗: 資料庫中不應存在 {TICKER_INVALID_HISTORICAL} 的數據，但找到了 {db_data['count_star()'].iloc[0]} 筆。"
@@ -373,9 +394,31 @@ def test_4_full_flow():
 
 # --- 主執行邏輯 ---
 if __name__ == "__main__":
-    # 初始化日誌檔案
+    log_dir = os.path.dirname(LOG_FILE_PATH)
+    # 使用 print 進行初始調試，因為 log_message 依賴於此目錄的成功創建
+    print(f"DEBUG: Determined log directory: {log_dir}")
+    if not os.path.exists(log_dir):
+        print(f"DEBUG: Log directory {log_dir} does not exist. Attempting to create.")
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            if os.path.exists(log_dir):
+                print(f"INFO: Test harness created log directory: {log_dir}")
+            else:
+                print(f"CRITICAL_ERROR: os.makedirs was called for {log_dir}, but it still does not exist!")
+                sys.exit(f"CRITICAL_FAILURE: Could not create log directory: {log_dir}")
+        except Exception as e:
+            print(f"CRITICAL_ERROR: Failed to create log directory {log_dir}: {e}")
+            sys.exit(f"CRITICAL_FAILURE: Exception while creating log directory: {log_dir} - {e}")
+    else:
+        print(f"DEBUG: Log directory {log_dir} already exists.")
+
+    # 初始化日誌檔案 (確保目錄已成功創建或已存在)
     if os.path.exists(LOG_FILE_PATH):
-        os.remove(LOG_FILE_PATH)
+        try:
+            os.remove(LOG_FILE_PATH)
+        except Exception as e:
+            print(f"WARNING: Failed to remove existing log file {LOG_FILE_PATH}: {e}. Log output may be mixed.")
+
     log_message(f"測試腳本 _test_v33_harness.py 開始執行。日誌將記錄於: {LOG_FILE_PATH}", to_console=True)
     log_message(f"Python 解譯器: {PYTHON_EXE}", to_console=False)
     log_message(f"待測腳本: {SCRIPT_PATH}", to_console=False)
