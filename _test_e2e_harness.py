@@ -13,7 +13,10 @@ import sqlite3
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 APPS_DIR = os.path.join(PROJECT_ROOT, "apps")
 MISSION_RUNNER_SCRIPT = os.path.join(APPS_DIR, "mission_runner", "run.py")
-ACTION_HANDLER_SCRIPT = os.path.join(APPS_DIR, "action_handler", "run.py")
+ACTION_HANDLER_SCRIPT = os.path.join(APPS_DIR, "action_handler", "run.py") # 將被移除或更新
+MAIN_EXECUTOR_SCRIPT = os.path.join(APPS_DIR, "main_executor", "run.py")
+DASHBOARD_API_SCRIPT = os.path.join(APPS_DIR, "dashboard_api", "run.py")
+
 
 class TestE2EHarness(unittest.TestCase):
 
@@ -81,337 +84,165 @@ class TestE2EHarness(unittest.TestCase):
         except Exception as e:
             self.fail(f"執行腳本 {os.path.basename(script_path)} 時發生未預期錯誤: {e}")
 
+    def _params_dict_to_list(self, params_dict):
+        """將參數字典轉換為 argparse 列表。"""
+        args_list = []
+        for key, value in params_dict.items():
+            arg_name = f"--{key.replace('_', '-')}"
+            if isinstance(value, bool): # 處理布林型參數
+                if value: # 如果為 True，只添加旗標本身
+                    args_list.append(arg_name)
+                # 如果為 False，則不添加該旗標 (argparse 預設行為)
+            elif value is not None: # 非 None 值，添加旗標和值
+                args_list.extend([arg_name, str(value)])
+            # None 值將被忽略，不添加到參數列表
+        return args_list
 
-    def _run_mission_runner(self, mission_params_dict, expected_return_code=0, timeout=60):
-        """執行 mission_runner 並返回其 stdout, stderr 和返回碼。"""
-        # 確保 mission_params_dict 包含必要的 REPOSITORY_URL 和 TARGET_BRANCH
-        mission_params_dict.setdefault("REPOSITORY_URL", "fake_repo_url")
-        mission_params_dict.setdefault("TARGET_BRANCH", "fake_branch")
+    def _run_main_executor(self, params_dict, expected_return_code=0, timeout=180): # 增加超時
+        """執行 main_executor 並返回其 stdout, stderr 和返回碼。"""
+        # 自動注入指向工作區的日誌路徑，這是 main_executor 的必要參數
+        params_dict.setdefault("db_path_logs", self.db_path_logs)
 
-        # 為了讓下游腳本使用 workspace 中的路徑，我們需要將這些路徑加入 mission_params
-        # 這假設 mission_runner 和下游腳本會識別並使用這些特定命名的參數
-        mission_params_dict["DB_PATH_LOGS"] = self.db_path_logs # 用於日誌記錄
-        mission_params_dict["DB_PATH_YFINANCE_CACHE"] = self.db_path_yfinance_cache # 用於標準分析
-        mission_params_dict["DB_PATH_RAW_TAIFEX"] = self.db_path_raw_taifex # 用於 ELT 載入
-        mission_params_dict["DB_PATH_TAIFEX_HISTORICAL"] = self.db_path_taifex_historical # 用於 ELT 轉換
-        mission_params_dict["REPORTS_DIR"] = self.reports_dir # 用於報告生成 (如果有的話)
-        # 其他特定於流程的資料庫路徑也應在此處添加，如果 mission_params 是它們的唯一來源
+        # 其他特定於 main_executor 可能需要的、且應指向工作區的路徑，
+        # 測試調用方應在 params_dict 中明確提供，例如：
+        # params_dict.setdefault("db_path_yfinance_cache", self.db_path_yfinance_cache)
+        # params_dict.setdefault("db_path_raw_taifex", self.db_path_raw_taifex)
+        # params_dict.setdefault("db_path_taifex_historical", self.db_path_taifex_historical)
+        # params_dict.setdefault("reports_dir", self.reports_dir) # 如果 main_executor 用到
 
-        params_b64 = self._encode_mission_params(mission_params_dict)
-        args = ["--mission-params", params_b64]
-        return self._run_script(MISSION_RUNNER_SCRIPT, args, expected_return_code, timeout)
+        args_list = self._params_dict_to_list(params_dict)
+        return self._run_script(MAIN_EXECUTOR_SCRIPT, args_list, expected_return_code, timeout)
 
-    def _run_action_handler(self, action_args_list, expected_return_code=0, timeout=30):
-        """執行 action_handler 並返回其 stdout, stderr 和返回碼。"""
-        # action_args_list 應該是像 ["--action=create_log_snapshot", "--log-db-path=...", ...]
-        return self._run_script(ACTION_HANDLER_SCRIPT, action_args_list, expected_return_code, timeout)
+    def _run_dashboard_api(self, params_dict, expected_return_code=0, timeout=30):
+        """執行 dashboard_api 並返回其 stdout, stderr 和返回碼。"""
+        # 自動注入指向工作區的日誌路徑
+        params_dict.setdefault("db_path_logs", self.db_path_logs)
+        args_list = self._params_dict_to_list(params_dict)
+        # Dashboard API 的輸出是 JSON，直接返回 stdout 給調用者解析
+        stdout, stderr, return_code = self._run_script(DASHBOARD_API_SCRIPT, args_list, expected_return_code, timeout)
+        return stdout, stderr, return_code # 返回三元組以保持一致性
 
-    # --- 佔位符測試方法 ---
-    def test_placeholder_e2e_test(self):
-        """一個佔位符測試，確保框架基本運作。"""
-        print(f"\n[E2E Test] Workspace for placeholder test: {self.workspace_dir}")
-        # 這裡可以執行一個非常簡單的 mission_runner 命令，例如無效模式，預期失敗
-        # 或者一個成功的串流測試，只檢查返回碼
-        test_params = {
-            "EXECUTION_MODE": "串流測試模式", # 假設這個模式存在且其虛假腳本無害
-            "STREAMING_TEST_MESSAGE_COUNT": 1,
-            "STREAMING_TEST_EXIT_CODE": 0
+    # --- v70.0 核心測試方法 ---
+    def test_full_mission_and_dashboard_verification(self):
+        """
+        v70.0 終極驗收測試：
+        1. 執行主任務 (main_executor)。
+        2. 驗證任務副作用 (日誌庫、產出檔案)。
+        3. 獲取儀表板數據 (dashboard_api)。
+        4. 驗證 API 數據與日誌庫內容一致。
+        """
+        print("[E2E Test] Running test_full_mission_and_dashboard_verification")
+
+        # --- Arrange ---
+        # 準備 main_executor 的參數
+        main_executor_params = {
+            "execution_mode": "standard_analysis",
+            "tickers": "AAPL,GOOG",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-05",
+            "force_data_refresh": False,
+            # db_path_logs, db_path_yfinance_cache 等會由 _run_main_executor 自動或按需設置
+            # 確保傳遞 yfinance_cache 路徑，因為 standard_analysis 模式的 main_executor parser 需要它
+            "db_path_yfinance_cache": self.db_path_yfinance_cache,
         }
-        stdout, stderr, code = self._run_mission_runner(test_params, expected_return_code=0)
-        self.assertIn("串流訊息 #1", stdout) # stdout 來自 mission_runner -> fake_streaming_script
-        # stderr 可能包含 mission_runner 的 INFO/DEBUG 訊息
-        if code == 0: # 僅在成功時檢查身份標籤
-            self.assertIn("[FAKE_STREAMING_SCRIPT_EXECUTION_COMPLETE]", stdout, "未找到 fake_streaming_script 的成功執行標記")
-        print(f"[E2E Test] Placeholder test stdout: {stdout.strip()}")
-        print(f"[E2E Test] Placeholder test stderr: {stderr.strip()}")
-        print("[E2E Test] Placeholder test completed.")
+        expected_main_executor_log_message_part = "開始執行標準分析流程。標的: AAPL,GOOG"
+        expected_main_executor_success_message = "模式 standard_analysis 成功執行完畢。"
 
-    def test_standard_analysis_flow(self):
-        """
-        測試標準分析流程：
-        - mission_runner 返回碼為 0。
-        - 在指定的 yfinance_cache 路徑下有模擬數據寫入。
-        - 在指定的 logs 路徑下有模擬日誌條目。
-        """
-        print("[E2E Test] Running test_standard_analysis_flow")
-        tickers = "NQ=F,ES=F"
-        start_date = "2024-01-01"
-        end_date = "2024-01-05"
+        # --- Act 1: 執行主任務 ---
+        print("[E2E Test] Act 1: Executing main_executor...")
+        executor_stdout, executor_stderr, executor_return_code = self._run_main_executor(
+            main_executor_params,
+            expected_return_code=0
+        )
+        # executor_stdout 通常是空的，因為 main_executor 主要通過 logging 模組記錄到資料庫和控制台（如果配置了）
+        # executor_stderr 可能包含 logging 到控制台的 DEBUG/INFO 訊息 (如果 setup_logging 中配置了 StreamHandler 到 stderr)
+        # 或者，如果 setup_logging 的 StreamHandler 指向 stdout，那 executor_stdout 就會有內容。
+        # 根據我 log_utils.py 的實現，StreamHandler 指向 sys.stdout。
+        # 所以 executor_stdout 會包含日誌。
 
-        mission_params = {
-            "EXECUTION_MODE": "標準分析流程",
-            "ANALYSIS_TICKERS": tickers,
-            "ANALYSIS_START_DATE": start_date,
-            "ANALYSIS_END_DATE": end_date,
-            # DB_PATH_LOGS 和 DB_PATH_YFINANCE_CACHE 會由 _run_mission_runner 自動注入
+        # --- Assert 1: 驗證任務副作用 ---
+        print("[E2E Test] Assert 1: Verifying main_executor side-effects...")
+        # 1.1 驗證日誌資料庫是否創建且包含預期日誌
+        self.assertTrue(os.path.exists(self.db_path_logs), f"日誌資料庫 {self.db_path_logs} 未創建。")
+
+        conn = sqlite3.connect(self.db_path_logs)
+        cursor = conn.cursor()
+
+        # 檢查是否有 "開始執行標準分析流程" 日誌
+        cursor.execute("SELECT COUNT(*) FROM logs WHERE message LIKE ?", (f"%{expected_main_executor_log_message_part}%",))
+        log_count = cursor.fetchone()[0]
+        self.assertGreaterEqual(log_count, 1, f"未在日誌資料庫中找到預期的啟動日誌訊息 '{expected_main_executor_log_message_part}'")
+        print(f"[E2E Assert] Found main_executor start log message.")
+
+        # 檢查是否有 "成功執行完畢" 日誌
+        cursor.execute("SELECT COUNT(*) FROM logs WHERE message LIKE ?", (f"%{expected_main_executor_success_message}%",))
+        success_log_count = cursor.fetchone()[0]
+        self.assertGreaterEqual(success_log_count, 1, f"未在日誌資料庫中找到預期的成功日誌訊息 '{expected_main_executor_success_message}'")
+        print(f"[E2E Assert] Found main_executor success log message.")
+
+        # 檢查是否有硬體日誌
+        cursor.execute("SELECT COUNT(*) FROM hardware_logs")
+        hw_log_count = cursor.fetchone()[0]
+        self.assertGreaterEqual(hw_log_count, 1, "未找到任何硬體日誌記錄。")
+        print(f"[E2E Assert] Found {hw_log_count} hardware log entries.")
+
+        conn.close()
+
+        # 1.2 驗證其他預期產出檔案 (例如 yfinance_cache) - 這裡 main_executor 是模擬執行，所以不會真的創建
+        # 如果 main_executor 真的調用了會創建 yfinance_cache 的邏輯，則可以取消註釋：
+        # self.assertTrue(os.path.exists(self.db_path_yfinance_cache),
+        #                 f"YFinance 快取資料庫 {self.db_path_yfinance_cache} 未創建。")
+        # print(f"[E2E Assert] Verified yfinance_cache existence (if applicable).")
+
+
+        # --- Act 2: 獲取儀表板數據 ---
+        print("[E2E Test] Act 2: Getting dashboard data...")
+        dashboard_api_params = {
+            "log_history_limit": 3
+            # db_path_logs 會由 _run_dashboard_api 自動注入
         }
+        api_stdout, api_stderr, api_return_code = self._run_dashboard_api(
+            dashboard_api_params,
+            expected_return_code=0
+        )
 
-        # Act
-        stdout, stderr, return_code = self._run_mission_runner(mission_params, expected_return_code=0)
+        # --- Assert 2: 驗證 API 數據 ---
+        print("[E2E Test] Assert 2: Verifying dashboard_api data...")
+        self.assertTrue(api_stdout, "Dashboard API 沒有任何輸出 (stdout)。")
 
-        # Assert
-        # 1. 驗證 yfinance_cache 檔案內容
-        self.assertTrue(os.path.exists(self.db_path_yfinance_cache), "yfinance_cache 檔案未創建")
-        with open(self.db_path_yfinance_cache, "r", encoding="utf-8") as f_cache:
-            cache_content = f_cache.read()
+        try:
+            dashboard_json = json.loads(api_stdout)
+        except json.JSONDecodeError as e:
+            self.fail(f"無法解析 Dashboard API 的 JSON 輸出: {e}\nAPI STDOUT:\n{api_stdout}")
 
-        expected_cache_snippet = f"YFINANCE_CACHE_DUMMY_DATA: For {tickers}, data from {start_date} to {end_date} written."
-        self.assertIn(expected_cache_snippet, cache_content, "yfinance_cache 內容不符合預期")
-        print(f"[E2E Assert] Verified yfinance_cache content at: {self.db_path_yfinance_cache}")
+        self.assertIsNone(dashboard_json.get("error"),
+                          f"Dashboard API 返回了錯誤訊息: {dashboard_json.get('error')}")
 
-        # 2. 驗證 logs 檔案內容
-        self.assertTrue(os.path.exists(self.db_path_logs), "日誌檔案未創建")
-        with open(self.db_path_logs, "r", encoding="utf-8") as f_logs:
-            logs_content = f_logs.read()
+        # 驗證 system_status.latest_event 是否與日誌中的成功訊息相關
+        # 由於 main_executor 的日誌格式是 "[asctime] [LEVEL] [module.func:lineno] - message"
+        # 而 dashboard_api 直接返回 message，所以可以部分匹配
+        self.assertIn(expected_main_executor_success_message,
+                      dashboard_json.get("system_status", {}).get("latest_event", ""),
+                      "Dashboard API 的 latest_event 與預期的 main_executor 成功日誌不符。")
+        print(f"[E2E Assert] Verified dashboard latest_event.")
 
-        expected_log_snippet = f"DAILY_MARKET_ANALYZER_LOG: Tickers {tickers} processed. Log DB: {self.db_path_logs}. Success."
-        self.assertIn(expected_log_snippet, logs_content, "日誌檔案內容不符合預期")
-        print(f"[E2E Assert] Verified logs content at: {self.db_path_logs}")
+        # 驗證 hardware_monitor 是否有數據 (main_executor 至少記錄了一次)
+        self.assertIsNotNone(dashboard_json.get("hardware_monitor", {}).get("cpu_percent"),
+                             "Dashboard API 未返回 CPU 使用率。")
+        self.assertIsNotNone(dashboard_json.get("hardware_monitor", {}).get("ram_percent"),
+                             "Dashboard API 未返回 RAM 使用率。")
+        print(f"[E2E Assert] Verified dashboard hardware_monitor data presence.")
 
-        # 3. 驗證 stdout 是否包含虛假腳本的打印訊息 (可選，但有助於調試)
-        self.assertIn(f"[FAKE ANALYZER] Logged to {self.db_path_logs}", stdout)
-        self.assertIn(f"[FAKE ANALYZER] Wrote to cache {self.db_path_yfinance_cache}", stdout)
-        self.assertIn("[FAKE_ANALYZER_EXECUTION_COMPLETE]", stdout, "未找到 fake_daily_market_analyzer 的成功執行標記")
-        print("[E2E Test] test_standard_analysis_flow completed successfully.")
+        # 驗證 log_history
+        log_history = dashboard_json.get("log_history", [])
+        self.assertGreaterEqual(len(log_history), 1, "Dashboard API 的 log_history 為空。")
+        # 檢查 log_history 中是否包含成功訊息
+        found_success_in_history = any(expected_main_executor_success_message in log_entry for log_entry in log_history)
+        self.assertTrue(found_success_in_history,
+                        f"Dashboard API 的 log_history 未包含預期的 main_executor 成功日誌 '{expected_main_executor_success_message}'.\nLog History:\n{log_history}")
+        print(f"[E2E Assert] Verified dashboard log_history content.")
 
-    def test_elt_load_and_transform_flow(self):
-        """
-        測試 ELT 載入和轉換流程：
-        - 依次執行 load 和 transform 步驟，返回碼均為 0。
-        - 驗證 raw_taifex 和 taifex_historical 檔案被創建且內容符合預期。
-        """
-        print("[E2E Test] Running test_elt_load_and_transform_flow")
-
-        # Arrange
-        # 1. 準備虛假原始數據檔案
-        fake_raw_data_filename = "fake_taifex_daily_data.csv"
-        self.fake_raw_data_filepath = os.path.join(self.workspace_dir, fake_raw_data_filename)
-        with open(self.fake_raw_data_filepath, "w", encoding="utf-8") as f_raw:
-            f_raw.write("date,contract,open,high,low,close,volume\n")
-            f_raw.write("20240101,TXF,18000,18050,17950,18020,1000\n")
-        print(f"[E2E Arrange] Created fake raw data file: {self.fake_raw_data_filepath}")
-
-        # 2. 準備 "ELT 載入" 指令包
-        load_params = {
-            "EXECUTION_MODE": "ELT第一階段：載入", # 與 mission_runner.py 中的 EXECUTION_MODE 匹配
-            "ELT_PIPELINE_STEP": "load",
-            "ELT_INPUT_FILE_PATH": self.fake_raw_data_filepath,
-            # DB_PATH_RAW_TAIFEX 和 DB_PATH_LOGS 會由 _run_mission_runner 自動注入
-        }
-
-        # Act - Load step
-        print("[E2E Act] Executing ELT Load step...")
-        load_stdout, load_stderr, load_return_code = self._run_mission_runner(load_params, expected_return_code=0)
-
-        # Assert - Load step
-        self.assertTrue(os.path.exists(self.db_path_raw_taifex), "raw_taifex 檔案未在 load 步驟後創建")
-        with open(self.db_path_raw_taifex, "r", encoding="utf-8") as f_raw_db:
-            raw_db_content = f_raw_db.read()
-        expected_raw_db_snippet = f"RAW_TAIFEX_DATA: Loaded from {self.fake_raw_data_filepath}"
-        self.assertIn(expected_raw_db_snippet, raw_db_content, "raw_taifex 檔案內容不符合預期")
-        self.assertIn(f"[FAKE TAIFEX PIPELINE] Loaded data from {self.fake_raw_data_filepath} to {self.db_path_raw_taifex}", load_stdout)
-        print(f"[E2E Assert] Verified raw_taifex content at: {self.db_path_raw_taifex}")
-
-        # 3. 準備 "ELT 轉換" 指令包
-        transform_params = {
-            "EXECUTION_MODE": "ELT第一階段：載入", # 假設轉換也用同一個 EXECUTION_MODE，通過 pipeline_step 區分
-            "ELT_PIPELINE_STEP": "transform",
-            # DB_PATH_RAW_TAIFEX, DB_PATH_TAIFEX_HISTORICAL, DB_PATH_LOGS 會自動注入
-        }
-
-        # Act - Transform step
-        print("[E2E Act] Executing ELT Transform step...")
-        transform_stdout, transform_stderr, transform_return_code = self._run_mission_runner(transform_params, expected_return_code=0)
-
-        # Assert - Transform step
-        self.assertTrue(os.path.exists(self.db_path_taifex_historical), "taifex_historical 檔案未在 transform 步驟後創建")
-        with open(self.db_path_taifex_historical, "r", encoding="utf-8") as f_hist_db:
-            hist_db_content = f_hist_db.read()
-        expected_hist_db_snippet = f"HISTORICAL_TAIFEX_DATA: Transformed from {self.db_path_raw_taifex}"
-        self.assertIn(expected_hist_db_snippet, hist_db_content, "taifex_historical 檔案內容不符合預期")
-        self.assertIn(f"[FAKE TAIFEX PIPELINE] Transformed data from {self.db_path_raw_taifex} to {self.db_path_taifex_historical}", transform_stdout)
-        print(f"[E2E Assert] Verified taifex_historical content at: {self.db_path_taifex_historical}")
-
-        # Assert - Logs for both steps
-        self.assertTrue(os.path.exists(self.db_path_logs), "日誌檔案未創建 (ELT)")
-        with open(self.db_path_logs, "r", encoding="utf-8") as f_logs:
-            logs_content = f_logs.read()
-        self.assertIn(f"TAIFEX_PIPELINE_LOG: Step load. Log DB: {self.db_path_logs}", logs_content)
-        self.assertIn(f"TAIFEX_PIPELINE_LOG: Step transform. Log DB: {self.db_path_logs}", logs_content)
-        print(f"[E2E Assert] Verified ELT logs content at: {self.db_path_logs}")
-
-        # 驗證身份標籤
-        self.assertIn("[FAKE_PIPELINE_EXECUTION_COMPLETE_LOAD]", load_stdout, "未找到 fake_taifex_data_pipeline (load) 的成功執行標記")
-        self.assertIn("[FAKE_PIPELINE_EXECUTION_COMPLETE_TRANSFORM]", transform_stdout, "未找到 fake_taifex_data_pipeline (transform) 的成功執行標記")
-        print("[E2E Test] test_elt_load_and_transform_flow completed successfully.")
-
-    def test_action_handler_create_snapshot(self):
-        """
-        測試 Action Handler 的 create_log_snapshot 功能：
-        - 先執行一個任務以生成日誌。
-        - 調用 action_handler 創建日誌快照。
-        - 驗證快照檔案被創建且內容正確。
-        """
-        print("[E2E Test] Running test_action_handler_create_snapshot")
-
-        # Arrange: 執行一個任務以生成日誌
-        initial_log_mission_params = {
-            "EXECUTION_MODE": "標準分析流程",
-            "ANALYSIS_TICKERS": "FOR_LOGGING_TEST",
-            "ANALYSIS_START_DATE": "2024-02-01",
-            "ANALYSIS_END_DATE": "2024-02-02",
-            # DB_PATH_LOGS 會被 _run_mission_runner 自動注入
-        }
-        print("[E2E Arrange] Generating initial logs...")
-        self._run_mission_runner(initial_log_mission_params, expected_return_code=0)
-
-        # 確保日誌檔案已創建且包含一些內容 (由 fake_daily_market_analyzer 寫入)
-        self.assertTrue(os.path.exists(self.db_path_logs), "初始日誌檔案未創建")
-        with open(self.db_path_logs, "r", encoding="utf-8") as f_initial_logs:
-            initial_log_content = f_initial_logs.read()
-        self.assertIn("DAILY_MARKET_ANALYZER_LOG: Tickers FOR_LOGGING_TEST processed", initial_log_content)
-        print(f"[E2E Arrange] Initial logs generated at: {self.db_path_logs}")
-
-        # Act: 調用 action_handler 創建快照
-        action_args = [
-            "--action=create_log_snapshot",
-            f"--log-db-path={self.db_path_logs}",
-            f"--output-dir={self.snapshot_output_dir}" # self.snapshot_output_dir 就是 self.workspace_dir
-        ]
-        print(f"[E2E Act] Calling action_handler with args: {action_args}")
-        ah_stdout, ah_stderr, ah_return_code = self._run_action_handler(action_args, expected_return_code=0)
-
-        # Assert: 驗證快照
-        # 1. 查找生成的快照檔案
-        snapshot_files = [f for f in os.listdir(self.snapshot_output_dir) if f.startswith("log_snapshot_") and f.endswith(".txt")]
-        self.assertEqual(len(snapshot_files), 1, f"應只生成一個快照檔案，但找到了 {len(snapshot_files)} 個: {snapshot_files}")
-        snapshot_filepath = os.path.join(self.snapshot_output_dir, snapshot_files[0])
-        print(f"[E2E Assert] Found snapshot file: {snapshot_filepath}")
-
-        # 2. 讀取並驗證快照內容
-        with open(snapshot_filepath, "r", encoding="utf-8") as f_snapshot:
-            snapshot_content = f_snapshot.read()
-
-        self.assertIn("Fake log snapshot content:", snapshot_content, "快照內容缺少預期的標頭")
-        # 虛假 action_handler 會將 self.db_path_logs (作為文本文件) 的內容包含進去
-        self.assertIn("Simulated read from:", snapshot_content)
-        self.assertIn("DAILY_MARKET_ANALYZER_LOG: Tickers FOR_LOGGING_TEST processed", snapshot_content,
-                      "快照內容未包含先前生成的日誌訊息")
-        print(f"[E2E Assert] Verified snapshot content in: {snapshot_filepath}")
-
-        # 驗證 action_handler 的身份標籤
-        self.assertIn("[FAKE_ACTION_HANDLER_EXECUTION_COMPLETE]", ah_stdout, "未找到 fake_action_handler 的成功執行標記")
-        print("[E2E Test] test_action_handler_create_snapshot completed successfully.")
-
-    def test_high_frequency_hardware_logging(self):
-        """
-        測試在高頻硬體日誌記錄功能：
-        - 執行一個會持續一段時間的任務。
-        - 驗證日誌檔案中是否包含多條模擬的硬體日誌記錄。
-        """
-        print("[E2E Test] Running test_high_frequency_hardware_logging")
-
-        num_hw_logs_to_generate = 5
-        # 總時長約 message_count * 0.1s (主延時) + num_hw_logs * hw_log_interval (硬體日誌間隔)
-        # 這裡 message_count 設為 num_hw_logs，確保有足夠的主循環來觸發硬體日誌
-        message_count = num_hw_logs_to_generate
-        hw_log_interval = 0.05 # 50ms
-
-        mission_params = {
-            "EXECUTION_MODE": "串流測試模式",
-            "STREAMING_TEST_MESSAGE_COUNT": message_count,
-            "STREAMING_TEST_NUM_HW_LOGS": num_hw_logs_to_generate,
-            "STREAMING_TEST_HW_LOG_INTERVAL": hw_log_interval,
-            "STREAMING_TEST_EXIT_CODE": 0,
-            # DB_PATH_LOGS 會由 _run_mission_runner 自動注入
-        }
-
-        # Act
-        print(f"[E2E Act] Executing streaming task to generate {num_hw_logs_to_generate} HW logs...")
-        stdout, stderr, return_code = self._run_mission_runner(mission_params, expected_return_code=0)
-
-        # Assert
-        self.assertTrue(os.path.exists(self.db_path_logs), "日誌檔案未創建 (HW Logging)")
-
-        hw_log_entries_found = 0
-        with open(self.db_path_logs, "r", encoding="utf-8") as f_logs:
-            for line in f_logs:
-                if "HARDWARE_LOG_ENTRY:" in line:
-                    hw_log_entries_found += 1
-
-        # 由於虛假腳本的設計是在每個 message_count 循環內寫入一個硬體日誌 (如果 i <= num_hw_logs)
-        # 所以預期生成的硬體日誌數量應該等於 num_hw_logs_to_generate
-        self.assertEqual(hw_log_entries_found, num_hw_logs_to_generate,
-                         f"預期找到 {num_hw_logs_to_generate} 條硬體日誌，實際找到 {hw_log_entries_found} 條。\n"
-                         f"STDOUT:\n{stdout}\nSTDERR:\n{stderr}\n"
-                         f"Log file content ({self.db_path_logs}):\n{open(self.db_path_logs, 'r', encoding='utf-8').read()}")
-
-        print(f"[E2E Assert] Found {hw_log_entries_found} hardware log entries as expected in {self.db_path_logs}")
-        # 驗證 fake_streaming_script 的身份標籤 (僅當成功執行時)
-        if return_code == 0:
-            self.assertIn("[FAKE_STREAMING_SCRIPT_EXECUTION_COMPLETE]", stdout, "未找到 fake_streaming_script 的成功執行標記")
-        print("[E2E Test] test_high_frequency_hardware_logging completed successfully.")
-
-    def test_force_refresh_options(self):
-        """
-        測試 FORCE_REPO_REFRESH 和 FORCE_DATA_REFRESH 選項的矩陣組合。
-        - FORCE_REPO_REFRESH=True 時，mission_runner 應打印特定日誌。
-        - FORCE_DATA_REFRESH=True 時，下游虛假腳本應打印特定日誌。
-        """
-        print("[E2E Test] Running test_force_refresh_options")
-        import itertools
-
-        base_mission_params = {
-            "EXECUTION_MODE": "標準分析流程", # 使用一個會觸發 FORCE_DATA_REFRESH 日誌的模式
-            "ANALYSIS_TICKERS": "REFRESH_TEST",
-            "ANALYSIS_START_DATE": "2024-03-01",
-            "ANALYSIS_END_DATE": "2024-03-01",
-        }
-
-        refresh_options = [True, False]
-        # itertools.product 會生成 (True, True), (True, False), (False, True), (False, False)
-        param_combinations = itertools.product(refresh_options, refresh_options)
-
-        for force_repo, force_data in param_combinations:
-            with self.subTest(force_repo_refresh=force_repo, force_data_refresh=force_data):
-                print(f"\n[E2E SubTest] Testing with FORCE_REPO_REFRESH={force_repo}, FORCE_DATA_REFRESH={force_data}")
-
-                current_params = base_mission_params.copy()
-                current_params["FORCE_REPO_REFRESH"] = force_repo
-                current_params["FORCE_DATA_REFRESH"] = force_data
-
-                # Act
-                stdout, stderr, return_code = self._run_mission_runner(current_params, expected_return_code=0)
-
-                # Assert for FORCE_REPO_REFRESH
-                repo_refresh_log_msg = "[MISSION_RUNNER_INFO] FORCE_REPO_REFRESH=True，模擬執行倉庫刷新操作（例如移除舊目錄）。"
-                if force_repo:
-                    self.assertIn(repo_refresh_log_msg, stderr,
-                                  f"預期在 STDERR 中找到 '{repo_refresh_log_msg}' 當 FORCE_REPO_REFRESH=True")
-                    print(f"[E2E Assert] Verified REPO_REFRESH log in STDERR for FORCE_REPO_REFRESH={force_repo}")
-                else:
-                    self.assertNotIn(repo_refresh_log_msg, stderr,
-                                     f"不應在 STDERR 中找到 '{repo_refresh_log_msg}' 當 FORCE_REPO_REFRESH=False")
-                    print(f"[E2E Assert] Verified NO REPO_REFRESH log in STDERR for FORCE_REPO_REFRESH={force_repo}")
-
-                # Assert for FORCE_DATA_REFRESH (來自 fake_daily_market_analyzer 的 stdout)
-                data_refresh_log_msg = "[FAKE ANALYZER] 強制刷新數據已啟用 (FORCE_DATA_REFRESH=True)"
-                if force_data:
-                    self.assertIn(data_refresh_log_msg, stdout,
-                                  f"預期在 STDOUT 中找到 '{data_refresh_log_msg}' 當 FORCE_DATA_REFRESH=True")
-                    print(f"[E2E Assert] Verified DATA_REFRESH log in STDOUT for FORCE_DATA_REFRESH={force_data}")
-                else:
-                    # 注意：如果 FORCE_DATA_REFRESH=False，虛假腳本不會打印任何關於它的訊息，所以我們檢查的是“不包含”
-                    # 但如果虛假腳本在 False 時打印了不同的訊息，則需要調整此斷言
-                    self.assertNotIn(data_refresh_log_msg, stdout,
-                                     f"不應在 STDOUT 中找到 '{data_refresh_log_msg}' 當 FORCE_DATA_REFRESH=False")
-                    print(f"[E2E Assert] Verified NO DATA_REFRESH log in STDOUT for FORCE_DATA_REFRESH={force_data}")
-
-                # 通用身份標籤驗證 (因為下游是 fake_daily_market_analyzer)
-                self.assertIn("[FAKE_ANALYZER_EXECUTION_COMPLETE]", stdout,
-                              f"未找到 fake_daily_market_analyzer 的成功執行標記 for combo REPO={force_repo}, DATA={force_data}")
-
-        print("[E2E Test] test_force_refresh_options completed successfully.")
+        print("[E2E Test] test_full_mission_and_dashboard_verification completed successfully.")
 
 
 if __name__ == "__main__":
@@ -423,15 +254,14 @@ if __name__ == "__main__":
     # (例如，手動運行 apps/mission_runner/_test_run.py 一次以生成它們，或者在 CI 流程中先執行它)
     # 更好的做法是在 TestE2EHarness.setUpClass 中創建所有依賴的虛假腳本。
 
-    # 確保在運行 E2E 測試前，所有依賴的虛假腳本都已生成
-    print("[E2E Main] Ensuring fake scripts are set up...")
-    from apps.mission_runner._test_run import TestMissionRunner
-    try:
-        TestMissionRunner.setUpClass() # 這會創建/覆蓋虛假腳本
-        print("[E2E Main] Fake scripts setup complete via TestMissionRunner.setUpClass().")
-    except Exception as e:
-        print(f"[E2E Main ERROR] Failed to set up fake scripts: {e}")
-        # 根據情況決定是否退出
+    # v70.0 不再依賴 apps.mission_runner._test_run 來生成虛假腳本
+    # print("[E2E Main] Ensuring fake scripts are set up...")
+    # from apps.mission_runner._test_run import TestMissionRunner # 已廢棄
+    # try:
+        # TestMissionRunner.setUpClass() # 這會創建/覆蓋虛假腳本
+        # print("[E2E Main] Fake scripts setup complete via TestMissionRunner.setUpClass().")
+    # except Exception as e:
+        # print(f"[E2E Main ERROR] Failed to set up fake scripts: {e}")
         # sys.exit(1)
 
     unittest.main()
