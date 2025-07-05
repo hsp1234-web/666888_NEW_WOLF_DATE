@@ -113,6 +113,12 @@ async def main():
     parser.add_argument("--metadata-db-path", help="元數據資料庫的完整路徑。")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
+    # ==================== 【唯一需要新增的程式碼】 ====================
+    # 目的：讓腳本認識從指揮中心傳來的 --enable-status-updates 參數。
+    # 方法：action="store_true" 將其定義為一個開關，即使目前未使用，也能避免腳本因不認識參數而崩潰。
+    parser.add_argument("--enable-status-updates", action="store_true", help="啟用狀態更新通訊協議 (此處僅為相容性存在)。")
+    # =================================================================
+
     args = parser.parse_args()
     logger.level = args.log_level.upper()
 
