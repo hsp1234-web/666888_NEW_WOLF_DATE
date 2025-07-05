@@ -112,6 +112,11 @@ async def main():
     parser.add_argument("--db-name", default="raw_taifex.duckdb", help="原始數據艙資料庫名稱。")
     parser.add_argument("--metadata-db-path", help="元數據資料庫的完整路徑。")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument(
+        "--enable-status-updates",
+        action="store_true",
+        help="接收來自指揮中心的狀態更新請求。即使應用目前不產生複雜進度更新，也必須能接收此參數以防止崩潰。"
+    )
 
     args = parser.parse_args()
     logger.level = args.log_level.upper()
