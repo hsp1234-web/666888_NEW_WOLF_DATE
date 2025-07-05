@@ -21,6 +21,12 @@ def build_analyzer_args(validated_params): # 改用 validated_params 以清晰�
     if validated_params.get("FORCE_DATA_REFRESH", False): # 確保即使 validated_params 中沒有也安全
         args.append("--force-data-refresh")
 
+    # E2E 測試傳入的資料庫路徑參數
+    if validated_params.get("DB_PATH_LOGS"):
+        args.extend(["--db-path-logs", validated_params["DB_PATH_LOGS"]])
+    if validated_params.get("DB_PATH_YFINANCE_CACHE"):
+        args.extend(["--db-path-yfinance-cache", validated_params["DB_PATH_YFINANCE_CACHE"]])
+
     # 假設 REPOSITORY_URL, TARGET_BRANCH, FORCE_REPO_REFRESH 等參數
     # 主要由 mission_runner 本身使用 (例如，用於前置的 git 操作)，
     # 或者需要決定是否以及如何傳遞給下游。
@@ -44,6 +50,38 @@ def build_taifex_load_args(validated_params): # 改用 validated_params
     # if params.get("LOGGING_MODE") == "除錯模式":
     # args.append("--debug-level", "high")
 
+    # E2E 測試傳入的資料庫路徑參數
+    if validated_params.get("DB_PATH_LOGS"): # ELT 過程可能也需要記錄日誌
+        args.extend(["--db-path-logs", validated_params["DB_PATH_LOGS"]])
+    if validated_params.get("DB_PATH_RAW_TAIFEX"):
+        args.extend(["--db-path-raw-taifex", validated_params["DB_PATH_RAW_TAIFEX"]])
+    if validated_params.get("DB_PATH_TAIFEX_HISTORICAL"):
+        args.extend(["--db-path-taifex-historical", validated_params["DB_PATH_TAIFEX_HISTORICAL"]])
+
+    # ELT 流程可能還需要輸入檔案路徑等
+    if validated_params.get("ELT_INPUT_FILE_PATH"):
+        args.extend(["--input-file-path", validated_params["ELT_INPUT_FILE_PATH"]])
+    if validated_params.get("ELT_PIPELINE_STEP"): # 用於區分 ELT 的不同階段
+        args.extend(["--pipeline-step", validated_params["ELT_PIPELINE_STEP"]])
+
+    return args
+
+def build_streaming_test_args(validated_params):
+    """為串流測試腳本建構參數。"""
+    args = []
+    # 從 validated_params 中獲取 STREAMING_TEST_EXIT_CODE 和 STREAMING_TEST_MESSAGE_COUNT
+    # 並將它們轉換為 --exit-code 和 --message-count
+    # 這些參數名是 mission_params JSON 中的鍵名
+    if validated_params.get("STREAMING_TEST_EXIT_CODE") is not None: # 檢查 None 以允許 0
+        args.extend(["--exit-code", str(validated_params["STREAMING_TEST_EXIT_CODE"])])
+    if validated_params.get("STREAMING_TEST_MESSAGE_COUNT") is not None: # 檢查 None
+        args.extend(["--message-count", str(validated_params["STREAMING_TEST_MESSAGE_COUNT"])])
+    if validated_params.get("DB_PATH_LOGS"): # 新增
+        args.extend(["--db-path-logs", validated_params["DB_PATH_LOGS"]])
+    if validated_params.get("STREAMING_TEST_NUM_HW_LOGS") is not None: # 新增
+        args.extend(["--num-hw-logs", str(validated_params["STREAMING_TEST_NUM_HW_LOGS"])])
+    if validated_params.get("STREAMING_TEST_HW_LOG_INTERVAL") is not None: # 新增
+        args.extend(["--hw-log-interval", str(validated_params["STREAMING_TEST_HW_LOG_INTERVAL"])])
     return args
 
 def main():
@@ -116,6 +154,30 @@ def main():
     else:
         validated_params["LOGGING_MODE"] = logging_mode_input
 
+    # 串流測試模式特定參數 (如果 EXECUTION_MODE 是 "串流測試模式")
+    if validated_params["EXECUTION_MODE"] == "串流測試模式":
+        validated_params["STREAMING_TEST_EXIT_CODE"] = mission_params.get("STREAMING_TEST_EXIT_CODE", 0)
+        validated_params["STREAMING_TEST_MESSAGE_COUNT"] = mission_params.get("STREAMING_TEST_MESSAGE_COUNT", 3)
+        validated_params["DB_PATH_LOGS"] = mission_params.get("DB_PATH_LOGS") # 也給串流測試用
+        validated_params["STREAMING_TEST_NUM_HW_LOGS"] = mission_params.get("STREAMING_TEST_NUM_HW_LOGS", 0)
+        validated_params["STREAMING_TEST_HW_LOG_INTERVAL"] = mission_params.get("STREAMING_TEST_HW_LOG_INTERVAL", 0.05)
+    elif validated_params["EXECUTION_MODE"] == "ELT第一階段：載入":
+        # 這些參數是 E2E 測試傳入的，用於告知虛假腳本如何操作
+        validated_params["DB_PATH_LOGS"] = mission_params.get("DB_PATH_LOGS")
+        validated_params["DB_PATH_RAW_TAIFEX"] = mission_params.get("DB_PATH_RAW_TAIFEX")
+        validated_params["DB_PATH_TAIFEX_HISTORICAL"] = mission_params.get("DB_PATH_TAIFEX_HISTORICAL")
+        validated_params["ELT_INPUT_FILE_PATH"] = mission_params.get("ELT_INPUT_FILE_PATH")
+        validated_params["ELT_PIPELINE_STEP"] = mission_params.get("ELT_PIPELINE_STEP") # 例如 "load" 或 "transform"
+    elif validated_params["EXECUTION_MODE"] == "標準分析流程":
+        # 這些參數是 E2E 測試傳入的
+        validated_params["DB_PATH_LOGS"] = mission_params.get("DB_PATH_LOGS")
+        validated_params["DB_PATH_YFINANCE_CACHE"] = mission_params.get("DB_PATH_YFINANCE_CACHE")
+
+    # 處理 FORCE_REPO_REFRESH 的日誌 (如果為 True)
+    if validated_params.get("FORCE_REPO_REFRESH", False):
+        # 實際的 git 操作應該在這裡或專用函數中執行，這裡僅為 E2E 測試添加日誌點
+        print("[MISSION_RUNNER_INFO] FORCE_REPO_REFRESH=True，模擬執行倉庫刷新操作（例如移除舊目錄）。", file=sys.stderr)
+
     # --- 路由邏輯，使用 validated_params ---
     execution_mode = validated_params["EXECUTION_MODE"]
 
@@ -128,6 +190,11 @@ def main():
     elif execution_mode == "ELT第一階段：載入":
         target_script_name = "taifex_data_pipeline/run.py"
         cmd_args = build_taifex_load_args(validated_params)
+    elif execution_mode == "串流測試模式": # 新增的 EXECUTION_MODE
+        target_script_name = "fake_streaming_script/run.py"
+        # validated_params 應包含 STREAMING_TEST_EXIT_CODE, STREAMING_TEST_MESSAGE_COUNT
+        # 這些參數需要在 validated_params 賦值區塊中從 mission_params 讀取並放入 validated_params
+        cmd_args = build_streaming_test_args(validated_params)
     else:
         print(f"[MISSION_RUNNER_ERROR] 未知的執行模式: {execution_mode}", file=sys.stderr)
         sys.exit(1)
@@ -146,31 +213,39 @@ def main():
             print(f"[MISSION_RUNNER_DEBUG] 最終驗證參數: {validated_params}", file=sys.stderr)
         print(f"[MISSION_RUNNER_INFO] 準備執行指令: {' '.join(final_cmd)}", file=sys.stderr)
 
-        process = subprocess.Popen(final_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
+        # 使用 Popen 創建子進程，並將 stdout 和 stderr 合併到同一個管道
+        process = subprocess.Popen(
+            final_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            errors='replace' # 處理潛在的編碼錯誤
+        )
 
-        # 即時讀取 stdout
+        # 逐行讀取子進程的輸出，並立即打印到 mission_runner 自身的標準輸出
+        # 這樣前端就能即時看到戰報
+        # 確保 process.stdout 是有效的
         if process.stdout:
             for line in iter(process.stdout.readline, ''):
-                sys.stdout.write(line)
-                sys.stdout.flush()
-            process.stdout.close()
+                print(line, end='') # print 到 mission_runner 的 stdout
+            process.stdout.close() # 完成讀取後關閉
 
-        # 即時讀取 stderr
-        if process.stderr:
-            for line in iter(process.stderr.readline, ''): # 修正此處，之前誤寫為 process.stdout.readline
-                sys.stderr.write(line)
-                sys.stderr.flush()
-            process.stderr.close()
+        # 等待子進程完全結束
+        process.wait()
 
-        return_code = process.wait()
+        # 檢查子進程的最終返回碼
+        if process.returncode != 0:
+            # 注意：下游腳本的 stderr 已經通過 stdout 打印，這裡的訊息是 mission_runner 自身的錯誤總結
+            print(f"\n[MISSION_RUNNER_ERROR] 下游任務 '{target_script_path}' 執行失敗 (返回碼: {process.returncode})", file=sys.stderr)
+            sys.exit(process.returncode)
 
-        if return_code != 0:
-            print(f"[MISSION_RUNNER_ERROR] 子腳本 {target_script_path} 執行失敗，返回碼: {return_code}", file=sys.stderr)
-            sys.exit(return_code)
-
+    except FileNotFoundError:
+        # target_script_path 在前面已經用 os.path.isfile 檢查過，但 Popen 仍可能因 $PATH 問題等拋出
+        print(f"\n[MISSION_RUNNER_CRITICAL] 指令執行失敗：找不到目標腳本 '{target_script_path}'。", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
-        # 捕獲更廣泛的異常，例如 Popen 構造時的錯誤
-        print(f"[MISSION_RUNNER_ERROR] 執行子腳本 {target_script_path} 時發生未預期錯誤: {e}", file=sys.stderr)
+        print(f"\n[MISSION_RUNNER_CRITICAL] 執行子進程 '{target_script_path}' 時發生未知錯誤: {e}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":
