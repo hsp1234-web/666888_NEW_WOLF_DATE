@@ -49,6 +49,7 @@ if __name__ == "__main__":
             with open(snapshot_filepath, "w", encoding="utf-8") as f_snapshot:
                 f_snapshot.write(log_content)
             print(f"[FAKE ACTION HANDLER] Created log snapshot: {snapshot_filepath}")
+            print("[FAKE_ACTION_HANDLER_EXECUTION_COMPLETE]", flush=True)
             sys.exit(0)
         except Exception as e:
             print(f"[FAKE ACTION HANDLER ERROR] Failed to create snapshot: {e}", file=sys.stderr)

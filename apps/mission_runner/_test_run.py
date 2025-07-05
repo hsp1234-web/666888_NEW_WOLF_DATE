@@ -32,6 +32,59 @@ def run_mission_runner(params_dict):
 
 class TestMissionRunner(unittest.TestCase):
 
+    def _extract_downstream_json_output(self, full_stdout, expected_tag=None):
+        """
+        從 mission_runner 的完整 stdout 中提取下游腳本的 JSON 輸出。
+        假設 JSON 是身份標籤之前的最後一個 '{...}' 行，或者如果沒有標籤，則是日誌之間的最後一個 '{...}' 行。
+        """
+        actual_downstream_stdout = ""
+        in_downstream_output = False
+        for line in full_stdout.splitlines():
+            if "下游服務即時戰報結束" in line:
+                in_downstream_output = False
+            if in_downstream_output:
+                actual_downstream_stdout += line + "\n"
+            if "下游服務即時戰報開始" in line:
+                in_downstream_output = True
+
+        if not actual_downstream_stdout.strip():
+            self.fail(f"未能從 mission_runner stdout 中提取到下游腳本的輸出。\n完整 STDOUT:\n{full_stdout}")
+
+        json_line = ""
+        lines = actual_downstream_stdout.strip().splitlines()
+
+        if not lines:
+             self.fail(f"提取的下游腳本輸出為空。\n完整 STDOUT:\n{full_stdout}")
+
+        # 優先嘗試從標籤前一行獲取 JSON
+        if expected_tag and lines[-1].strip() == expected_tag:
+            if len(lines) > 1 and lines[-2].strip().startswith("{") and lines[-2].strip().endswith("}"):
+                json_line = lines[-2]
+            # 如果標籤是唯一一行，或者標籤前沒有 JSON，則可能 JSON 是更早的獨立行
+            elif lines[0].strip().startswith("{") and lines[0].strip().endswith("}"): # 檢查第一行是不是JSON
+                 json_line = lines[0]
+
+        if not json_line:
+            # 如果沒有標籤或上述策略失敗，則從後往前找第一個看起來像 JSON 的行
+            for line in reversed(lines):
+                stripped_line = line.strip()
+                if stripped_line.startswith("{") and stripped_line.endswith("}"):
+                    try:
+                        json.loads(stripped_line) # 驗證是否為有效 JSON
+                        json_line = stripped_line
+                        break
+                    except json.JSONDecodeError:
+                        continue # 不是有效的 JSON，繼續找
+
+        if not json_line:
+            self.fail(f"無法從下游腳本輸出中找到 JSON 行。\n提取的下游 STDOUT:\n{actual_downstream_stdout}\n完整 STDOUT:\n{full_stdout}")
+
+        try:
+            return json.loads(json_line)
+        except json.JSONDecodeError as e:
+            self.fail(f"解析下游腳本 JSON 輸出失敗: {e}\n完整 STDOUT:\n{full_stdout}\n提取的下游 STDOUT:\n{actual_downstream_stdout}\n嘗試解析的 JSON Line: '{json_line}'")
+
+
     @classmethod
     def setUpClass(cls):
         # 創建/覆蓋虛假的下游腳本，用於測試 mission_runner 的參數傳遞
@@ -86,6 +139,7 @@ if __name__ == "__main__":
 
     output_data = {"script": "daily_market_analyzer", "args": vars(args), "cwd": os.getcwd()}
     print(json.dumps(output_data)) # 主要用於 _test_run.py 自身的斷言
+    print("[FAKE_ANALYZER_EXECUTION_COMPLETE]", flush=True)
     sys.exit(0)
 """
         with open(fake_analyzer_script_path, "w", encoding="utf-8") as f:
@@ -141,6 +195,12 @@ if __name__ == "__main__":
 
     output_data = {"script": "taifex_data_pipeline", "args": vars(args), "cwd": os.getcwd()}
     print(json.dumps(output_data)) # 主要用於 _test_run.py 自身的斷言
+    if args.pipeline_step == 'load':
+        print("[FAKE_PIPELINE_EXECUTION_COMPLETE_LOAD]", flush=True)
+    elif args.pipeline_step == 'transform':
+        print("[FAKE_PIPELINE_EXECUTION_COMPLETE_TRANSFORM]", flush=True)
+    else: # 如果沒有 pipeline_step (雖然不太可能，因為 argparse 有 choices) 或其他情況
+        print("[FAKE_PIPELINE_EXECUTION_COMPLETE_UNKNOWN_STEP]", flush=True)
     sys.exit(0)
 """
         with open(fake_taifex_script_path, "w", encoding="utf-8") as f:
@@ -189,8 +249,10 @@ if __name__ == "__main__":
             time.sleep(0.1) # 模擬主要工作的耗時操作
 
     if args.exit_code != 0:
-        print(f"串流腳本將以錯誤碼 {args.exit_code} 退出。", file=sys.stderr)
-        sys.stderr.flush()
+        print(f"串流腳本將以錯誤碼 {args.exit_code} 退出。", file=sys.stderr, flush=True)
+        # 不打印成功標籤，因為它失敗了
+    else:
+        print("[FAKE_STREAMING_SCRIPT_EXECUTION_COMPLETE]", flush=True)
 
     sys.exit(args.exit_code)
 """
@@ -252,6 +314,7 @@ if __name__ == "__main__":
             with open(snapshot_filepath, "w", encoding="utf-8") as f_snapshot:
                 f_snapshot.write(log_content)
             print(f"[FAKE ACTION HANDLER] Created log snapshot: {snapshot_filepath}")
+            print("[FAKE_ACTION_HANDLER_EXECUTION_COMPLETE]", flush=True)
             sys.exit(0)
         except Exception as e:
             print(f"[FAKE ACTION HANDLER ERROR] Failed to create snapshot: {e}", file=sys.stderr)
@@ -294,31 +357,18 @@ if __name__ == "__main__":
         self.assertEqual(return_code, 0, f"標準分析流程應成功執行。STDERR: {stderr}")
 
         try:
-            # 下游腳本可能先打印日誌行，JSON 在最後一行
-            self.assertTrue(stdout and stdout.strip(), f"stdout 不應為空，期望下游腳本的輸出。\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
-            json_line = ""
-            lines = stdout.strip().splitlines()
-            if lines:
-                json_line = lines[-1]
+            downstream_output = self._extract_downstream_json_output(stdout, expected_tag="[FAKE_ANALYZER_EXECUTION_COMPLETE]")
 
-            if not json_line:
-                self.fail(f"無法從 stdout 中找到 JSON 輸出。\nSTDOUT:\n{stdout}")
-
-            downstream_output = json.loads(json_line)
             self.assertEqual(downstream_output.get("script"), "daily_market_analyzer")
             received_args = downstream_output.get("args", {})
 
             self.assertEqual(received_args.get("tickers"), params["ANALYSIS_TICKERS"])
             self.assertEqual(received_args.get("start_date"), params["ANALYSIS_START_DATE"])
             self.assertEqual(received_args.get("end_date"), params["ANALYSIS_END_DATE"])
-            # FORCE_DATA_REFRESH 在此案例中為 False，所以下游不應收到 --force-data-refresh
-            # 虛假腳本將 force_data_refresh 設置為 False (如果未提供該 flag) 或 True (如果提供了)
             self.assertEqual(received_args.get("force_data_refresh"), False)
 
-        except (json.JSONDecodeError, IndexError) as e:
-            self.fail(f"解析下游腳本輸出失敗: {e}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
-        except KeyError as e:
-            self.fail(f"下游腳本輸出中缺少預期的鍵: {e}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
+        except KeyError as e: # _extract_downstream_json_output 內部會處理 JSONDecodeError
+            self.fail(f"下游腳本輸出中缺少預期的鍵: {e}\n完整 STDOUT:\n{stdout}")
 
     def test_case_2_elt_load_flow(self):
         """
@@ -339,29 +389,17 @@ if __name__ == "__main__":
         self.assertEqual(return_code, 0, f"ELT 載入流程應成功執行。STDERR: {stderr}")
 
         try:
-            # 下游腳本可能先打印日誌行，JSON 在最後一行
-            self.assertTrue(stdout and stdout.strip(), f"stdout 不應為空，期望下游腳本的輸出。\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
-            json_line = ""
-            lines = stdout.strip().splitlines()
-            if lines:
-                json_line = lines[-1]
+            # 這裡的 fake_taifex_data_pipeline 在 ELT mode (無 step) 時打印 FAKE_PIPELINE_EXECUTION_COMPLETE_UNKNOWN_STEP
+            downstream_output = self._extract_downstream_json_output(stdout, expected_tag="[FAKE_PIPELINE_EXECUTION_COMPLETE_UNKNOWN_STEP]")
 
-            if not json_line:
-                self.fail(f"無法從 stdout 中找到 JSON 輸出。\nSTDOUT:\n{stdout}")
-
-            downstream_output = json.loads(json_line)
             self.assertEqual(downstream_output.get("script"), "taifex_data_pipeline")
             received_args = downstream_output.get("args", {})
 
-            # 在此測試案例中，FORCE_DATA_REFRESH 傳入的是 False
-            # 虛假腳本 taifex_data_pipeline/run.py 應將 force_data_refresh 記錄為 False
             self.assertEqual(received_args.get("force_data_refresh"), False,
                              "FORCE_DATA_REFRESH 應為 False 或未在下游腳本參數中設置為 True")
 
-        except (json.JSONDecodeError, IndexError) as e:
-            self.fail(f"解析下游腳本輸出失敗: {e}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
         except KeyError as e:
-            self.fail(f"下游腳本輸出中缺少預期的鍵: {e}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
+            self.fail(f"下游腳本輸出中缺少預期的鍵: {e}\n完整 STDOUT:\n{stdout}")
 
     def test_case_3_force_refresh_flag(self):
         """
@@ -385,29 +423,20 @@ if __name__ == "__main__":
         self.assertEqual(return_code, 0, f"強制刷新流程應成功執行。STDERR: {stderr}")
 
         try:
-            # 下游腳本可能先打印日誌行（例如 FORCE_DATA_REFRESH 的訊息），JSON 在最後一行
-            self.assertTrue(stdout and stdout.strip(), f"stdout 不應為空，期望下游腳本的輸出。\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
-            json_line = ""
-            lines = stdout.strip().splitlines()
-            if lines:
-                json_line = lines[-1] # 取最後一行
+            # fake_daily_market_analyzer 會先打印 FORCE_DATA_REFRESH 訊息，然後 JSON，然後身份標籤
+            downstream_output = self._extract_downstream_json_output(stdout, expected_tag="[FAKE_ANALYZER_EXECUTION_COMPLETE]")
 
-            if not json_line:
-                self.fail(f"無法從 stdout 中找到 JSON 輸出。\nSTDOUT:\n{stdout}")
-
-            downstream_output = json.loads(json_line)
             self.assertEqual(downstream_output.get("script"), "daily_market_analyzer")
             received_args = downstream_output.get("args", {})
 
-            # 關鍵驗證：FORCE_DATA_REFRESH 在此案例中為 True
-            # 虛假腳本 daily_market_analyzer/run.py 應將 force_data_refresh 記錄為 True
             self.assertEqual(received_args.get("force_data_refresh"), True,
                              "下游腳本接收到的 force_data_refresh 參數應為 True")
 
-        except (json.JSONDecodeError, IndexError) as e:
-            self.fail(f"解析下游腳本輸出失敗: {e}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
+            # 額外驗證 stdout 中確實包含了 FORCE_DATA_REFRESH 的日誌訊息
+            self.assertIn("[FAKE ANALYZER] 強制刷新數據已啟用 (FORCE_DATA_REFRESH=True)", stdout)
+
         except KeyError as e:
-            self.fail(f"下游腳本輸出中缺少預期的鍵: {e}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
+            self.fail(f"下游腳本輸出中缺少預期的鍵: {e}\n完整 STDOUT:\n{stdout}")
 
     def test_case_4_invalid_execution_mode(self):
         """
@@ -470,22 +499,10 @@ if __name__ == "__main__":
         # 驗證下游腳本是否收到了預設的 tickers
         # 這需要下游腳本將其收到的參數打印到 stdout，以便此處解析
         try:
-            # 下游腳本可能先打印日誌行，JSON 在最後一行
-            if stdout and stdout.strip():
-                json_line = ""
-                lines = stdout.strip().splitlines()
-                if lines:
-                    json_line = lines[-1] # 取最後一行作為 JSON
-
-                if not json_line:
-                    self.fail(f"無法從 stdout 中找到 JSON 輸出。\nSTDOUT:\n{stdout}")
-
-                downstream_output = json.loads(json_line)
-                self.assertEqual(downstream_output.get("args", {}).get("tickers"), "NQ=F,ES=F,^VIX")
-            else:
-                self.fail(f"下游腳本沒有任何 stdout 輸出，無法驗證 tickers。\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
-        except (json.JSONDecodeError, IndexError) as e:
-            self.fail(f"解析下游腳本 JSON 輸出失敗: {e}\nSTDOUT:\n{stdout}\nJSON Line Tried: '{json_line if 'json_line' in locals() else 'N/A'}'")
+            downstream_output = self._extract_downstream_json_output(stdout, expected_tag="[FAKE_ANALYZER_EXECUTION_COMPLETE]")
+            self.assertEqual(downstream_output.get("args", {}).get("tickers"), "NQ=F,ES=F,^VIX")
+        except KeyError as e:
+             self.fail(f"下游腳本輸出中缺少預期的鍵 'tickers': {e}\n完整 STDOUT:\n{stdout}")
 
 
     def test_streaming_output_and_return_code(self):
@@ -517,14 +534,25 @@ if __name__ == "__main__":
             "串流訊息 #3"
         ]
         # 移除空行並比較
-        actual_lines_success = [line for line in stdout_success.splitlines() if line.strip()]
+        # 從 stdout_success 提取下游腳本的實際輸出
+        downstream_stdout_success = ""
+        in_downstream_output_success = False
+        for line in stdout_success.splitlines():
+            if "下游服務即時戰報結束" in line:
+                in_downstream_output_success = False
+            if in_downstream_output_success:
+                downstream_stdout_success += line + "\n"
+            if "下游服務即時戰報開始" in line:
+                in_downstream_output_success = True
+
+        actual_lines_success = [line for line in downstream_stdout_success.strip().splitlines() if line.strip() and "[FAKE_STREAMING_SCRIPT_EXECUTION_COMPLETE]" not in line]
 
         self.assertEqual(len(actual_lines_success), len(expected_lines_success),
-                         f"預期輸出 {len(expected_lines_success)} 行，實際 {len(actual_lines_success)} 行。\nSTDOUT:\n{stdout_success}\nSTDERR:\n{stderr_success}")
+                         f"預期輸出 {len(expected_lines_success)} 行，實際 {len(actual_lines_success)} 行。\n完整 STDOUT:\n{stdout_success}\n提取的下游 STDOUT:\n{downstream_stdout_success}")
 
         for i, expected_line in enumerate(expected_lines_success):
-            self.assertIn(expected_line, actual_lines_success[i],
-                          f"第 {i+1} 行輸出不匹配。\n預期包含: '{expected_line}'\n實際: '{actual_lines_success[i]}'\n完整 STDOUT:\n{stdout_success}")
+            self.assertEqual(expected_line, actual_lines_success[i], # 改為assertEqual以精確匹配
+                          f"第 {i+1} 行輸出不匹配。\n預期: '{expected_line}'\n實際: '{actual_lines_success[i]}'\n提取的下游 STDOUT:\n{downstream_stdout_success}")
 
         # 測試 2: 失敗執行，返回碼非零
         failure_exit_code = 5
@@ -546,25 +574,33 @@ if __name__ == "__main__":
         expected_lines_failure = [
             "串流訊息 #1",
             "串流訊息 #2",
-            f"串流腳本將以錯誤碼 {failure_exit_code} 退出。" # 這是 fake_streaming_script 打印到 stderr 的，但會被合併到 stdout
+            f"串流腳本將以錯誤碼 {failure_exit_code} 退出。"
         ]
-        actual_lines_failure = [line for line in stdout_failure.splitlines() if line.strip()]
 
-        # 檢查 stdout 是否至少包含了預期的訊息行
-        # 順序可能因 print 和 sys.stderr.flush() 的時間而略有不同，但都應存在
-        # 由於 stderr 也重定向到 stdout，mission_runner 的最終錯誤訊息也會在 stdout_failure 中
-        # print(f"DEBUG Failure STDOUT:\n{stdout_failure}")
-        # print(f"DEBUG Failure STDERR:\n{stderr_failure}")
+        # 從 stdout_failure 提取下游腳本的實際輸出
+        downstream_stdout_failure = ""
+        in_downstream_output_failure = False
+        for line in stdout_failure.splitlines():
+            if "下游服務即時戰報結束" in line:
+                in_downstream_output_failure = False
+            if in_downstream_output_failure:
+                downstream_stdout_failure += line + "\n"
+            if "下游服務即時戰報開始" in line:
+                in_downstream_output_failure = True
 
+        actual_lines_failure = [line for line in downstream_stdout_failure.strip().splitlines() if line.strip()]
 
+        # 檢查提取的下游輸出是否包含了預期的訊息行
         for expected_line in expected_lines_failure:
             self.assertTrue(any(expected_line in actual_line for actual_line in actual_lines_failure),
-                            f"預期在 STDOUT 中找到 '{expected_line}'，但未找到。\nSTDOUT:\n{stdout_failure}")
+                            f"預期在下游 STDOUT 中找到 '{expected_line}'，但未找到。\n提取的下游 STDOUT:\n{downstream_stdout_failure}\n完整 STDOUT:\n{stdout_failure}")
 
-        # 驗證 mission_runner 自身的錯誤訊息 (它會打印到 stderr，但我們的 run_mission_runner 函數分別捕獲了 stderr)
-        self.assertIn(f"[MISSION_RUNNER_ERROR] 下游任務 '/app/apps/fake_streaming_script/run.py' 執行失敗 (返回碼: {failure_exit_code})",
+        # 驗證 mission_runner 自身的錯誤訊息 (它會打印到 mission_runner 的 stderr)
+        # 注意：mission_runner.py 中使用的是 "執行失敗，返回碼:"
+        expected_stderr_msg = f"[MISSION_RUNNER_FAILURE] 下游任務 '/app/apps/fake_streaming_script/run.py' 執行失敗，返回碼: {failure_exit_code}"
+        self.assertIn(expected_stderr_msg,
                       stderr_failure,
-                      f"預期的 mission_runner 錯誤訊息未在 STDERR 中找到。\nSTDERR:\n{stderr_failure}")
+                      f"預期的 mission_runner 錯誤訊息未在 STDERR 中找到。\n預期包含: '{expected_stderr_msg}'\n實際 STDERR:\n{stderr_failure}")
 
 
 if __name__ == "__main__":

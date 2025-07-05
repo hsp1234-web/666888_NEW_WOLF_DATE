@@ -37,7 +37,9 @@ if __name__ == "__main__":
             time.sleep(0.1) # 模擬主要工作的耗時操作
 
     if args.exit_code != 0:
-        print(f"串流腳本將以錯誤碼 {args.exit_code} 退出。", file=sys.stderr)
-        sys.stderr.flush()
+        print(f"串流腳本將以錯誤碼 {args.exit_code} 退出。", file=sys.stderr, flush=True)
+        # 不打印成功標籤，因為它失敗了
+    else:
+        print("[FAKE_STREAMING_SCRIPT_EXECUTION_COMPLETE]", flush=True)
 
     sys.exit(args.exit_code)

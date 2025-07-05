@@ -206,46 +206,57 @@ def main():
         print(f"[MISSION_RUNNER_ERROR] 找不到目標腳本檔案或非檔案: {target_script_path}", file=sys.stderr)
         sys.exit(1)
 
+    # =================================================================
+    #               「戰神之究極」標準執行核心 v1.0
+    # =================================================================
     try:
+        # 構建最終指令
         final_cmd = [sys.executable, target_script_path] + cmd_args
-        # 在除錯模式下，可以打印更多關於 validated_params 的信息
-        if validated_params["LOGGING_MODE"] in ["除錯模式", "詳細模式"]:
-            print(f"[MISSION_RUNNER_DEBUG] 最終驗證參數: {validated_params}", file=sys.stderr)
-        print(f"[MISSION_RUNNER_INFO] 準備執行指令: {' '.join(final_cmd)}", file=sys.stderr)
 
-        # 使用 Popen 創建子進程，並將 stdout 和 stderr 合併到同一個管道
+        # 在除錯模式下，可以打印更多關於 validated_params 的信息 (移到指令打印前)
+        if validated_params.get("LOGGING_MODE") in ["除錯模式", "詳細模式"]: # 使用 .get 以防 LOGGING_MODE 意外缺失
+            print(f"[MISSION_RUNNER_DEBUG] 最終驗證參數: {validated_params}", file=sys.stderr, flush=True)
+
+        print(f"\n[MISSION_RUNNER_EXECUTE] 正在向最終作戰單位下達指令...", flush=True)
+        print(f"[CMD] {' '.join(final_cmd)}", flush=True)
+        print("-" * 25, "下游服務即時戰報開始", "-" * 25, flush=True)
+
+        # **核心：使用 Popen 創建子進程，這是確保流式輸出的唯一標準模式**
         process = subprocess.Popen(
             final_cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.STDOUT, # 合併 stdout 和 stderr
             text=True,
             encoding='utf-8',
-            errors='replace' # 處理潛在的編碼錯誤
+            errors='replace'
         )
 
-        # 逐行讀取子進程的輸出，並立即打印到 mission_runner 自身的標準輸出
-        # 這樣前端就能即時看到戰報
-        # 確保 process.stdout 是有效的
-        if process.stdout:
+        # **核心：實時監聽並打印子進程的每一行輸出**
+        if process.stdout: # 檢查 stdout 是否有效
             for line in iter(process.stdout.readline, ''):
-                print(line, end='') # print 到 mission_runner 的 stdout
+                sys.stdout.write(line) # 直接寫入，避免 print 額外的換行 (除非 line 本身有)
+                sys.stdout.flush()
             process.stdout.close() # 完成讀取後關閉
 
-        # 等待子進程完全結束
+        # **核心：阻塞式等待子進程完全結束，並獲取最終的返回碼**
         process.wait()
+        final_return_code = process.returncode
 
-        # 檢查子進程的最終返回碼
-        if process.returncode != 0:
-            # 注意：下游腳本的 stderr 已經通過 stdout 打印，這裡的訊息是 mission_runner 自身的錯誤總結
-            print(f"\n[MISSION_RUNNER_ERROR] 下游任務 '{target_script_path}' 執行失敗 (返回碼: {process.returncode})", file=sys.stderr)
-            sys.exit(process.returncode)
+        print("-" * 25, "下游服務即時戰報結束", "-" * 25, flush=True)
 
-    except FileNotFoundError:
-        # target_script_path 在前面已經用 os.path.isfile 檢查過，但 Popen 仍可能因 $PATH 問題等拋出
-        print(f"\n[MISSION_RUNNER_CRITICAL] 指令執行失敗：找不到目標腳本 '{target_script_path}'。", file=sys.stderr)
+        # **核心：根據下游服務的真實返回碼，決定自身的成敗**
+        if final_return_code != 0:
+            print(f"\n[MISSION_RUNNER_FAILURE] 下游任務 '{target_script_path}' 執行失敗，返回碼: {final_return_code}", file=sys.stderr, flush=True)
+            sys.exit(final_return_code)
+        else:
+            # 只有當 final_return_code 為 0 時才打印成功訊息
+            print(f"\n[MISSION_RUNNER_SUCCESS] 下游任務成功完成。", flush=True)
+
+    except FileNotFoundError: # 特指 final_cmd 中的可執行文件找不到
+        print(f"\n[MISSION_RUNNER_CRITICAL] 指令執行失敗：找不到目標腳本 '{target_script_path}' 或 Python 解釋器 '{sys.executable}'。", file=sys.stderr, flush=True)
         sys.exit(1)
     except Exception as e:
-        print(f"\n[MISSION_RUNNER_CRITICAL] 執行子進程 '{target_script_path}' 時發生未知錯誤: {e}", file=sys.stderr)
+        print(f"\n[MISSION_RUNNER_CRITICAL] 執行子進程 '{target_script_path}' 時發生未知致命錯誤: {e}", file=sys.stderr, flush=True)
         sys.exit(1)
 
 if __name__ == "__main__":

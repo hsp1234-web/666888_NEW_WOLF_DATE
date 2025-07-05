@@ -120,6 +120,8 @@ class TestE2EHarness(unittest.TestCase):
         stdout, stderr, code = self._run_mission_runner(test_params, expected_return_code=0)
         self.assertIn("串流訊息 #1", stdout) # stdout 來自 mission_runner -> fake_streaming_script
         # stderr 可能包含 mission_runner 的 INFO/DEBUG 訊息
+        if code == 0: # 僅在成功時檢查身份標籤
+            self.assertIn("[FAKE_STREAMING_SCRIPT_EXECUTION_COMPLETE]", stdout, "未找到 fake_streaming_script 的成功執行標記")
         print(f"[E2E Test] Placeholder test stdout: {stdout.strip()}")
         print(f"[E2E Test] Placeholder test stderr: {stderr.strip()}")
         print("[E2E Test] Placeholder test completed.")
@@ -169,6 +171,7 @@ class TestE2EHarness(unittest.TestCase):
         # 3. 驗證 stdout 是否包含虛假腳本的打印訊息 (可選，但有助於調試)
         self.assertIn(f"[FAKE ANALYZER] Logged to {self.db_path_logs}", stdout)
         self.assertIn(f"[FAKE ANALYZER] Wrote to cache {self.db_path_yfinance_cache}", stdout)
+        self.assertIn("[FAKE_ANALYZER_EXECUTION_COMPLETE]", stdout, "未找到 fake_daily_market_analyzer 的成功執行標記")
         print("[E2E Test] test_standard_analysis_flow completed successfully.")
 
     def test_elt_load_and_transform_flow(self):
@@ -236,6 +239,10 @@ class TestE2EHarness(unittest.TestCase):
         self.assertIn(f"TAIFEX_PIPELINE_LOG: Step load. Log DB: {self.db_path_logs}", logs_content)
         self.assertIn(f"TAIFEX_PIPELINE_LOG: Step transform. Log DB: {self.db_path_logs}", logs_content)
         print(f"[E2E Assert] Verified ELT logs content at: {self.db_path_logs}")
+
+        # 驗證身份標籤
+        self.assertIn("[FAKE_PIPELINE_EXECUTION_COMPLETE_LOAD]", load_stdout, "未找到 fake_taifex_data_pipeline (load) 的成功執行標記")
+        self.assertIn("[FAKE_PIPELINE_EXECUTION_COMPLETE_TRANSFORM]", transform_stdout, "未找到 fake_taifex_data_pipeline (transform) 的成功執行標記")
         print("[E2E Test] test_elt_load_and_transform_flow completed successfully.")
 
     def test_action_handler_create_snapshot(self):
@@ -291,6 +298,9 @@ class TestE2EHarness(unittest.TestCase):
         self.assertIn("DAILY_MARKET_ANALYZER_LOG: Tickers FOR_LOGGING_TEST processed", snapshot_content,
                       "快照內容未包含先前生成的日誌訊息")
         print(f"[E2E Assert] Verified snapshot content in: {snapshot_filepath}")
+
+        # 驗證 action_handler 的身份標籤
+        self.assertIn("[FAKE_ACTION_HANDLER_EXECUTION_COMPLETE]", ah_stdout, "未找到 fake_action_handler 的成功執行標記")
         print("[E2E Test] test_action_handler_create_snapshot completed successfully.")
 
     def test_high_frequency_hardware_logging(self):
@@ -337,6 +347,9 @@ class TestE2EHarness(unittest.TestCase):
                          f"Log file content ({self.db_path_logs}):\n{open(self.db_path_logs, 'r', encoding='utf-8').read()}")
 
         print(f"[E2E Assert] Found {hw_log_entries_found} hardware log entries as expected in {self.db_path_logs}")
+        # 驗證 fake_streaming_script 的身份標籤 (僅當成功執行時)
+        if return_code == 0:
+            self.assertIn("[FAKE_STREAMING_SCRIPT_EXECUTION_COMPLETE]", stdout, "未找到 fake_streaming_script 的成功執行標記")
         print("[E2E Test] test_high_frequency_hardware_logging completed successfully.")
 
     def test_force_refresh_options(self):
@@ -393,6 +406,10 @@ class TestE2EHarness(unittest.TestCase):
                     self.assertNotIn(data_refresh_log_msg, stdout,
                                      f"不應在 STDOUT 中找到 '{data_refresh_log_msg}' 當 FORCE_DATA_REFRESH=False")
                     print(f"[E2E Assert] Verified NO DATA_REFRESH log in STDOUT for FORCE_DATA_REFRESH={force_data}")
+
+                # 通用身份標籤驗證 (因為下游是 fake_daily_market_analyzer)
+                self.assertIn("[FAKE_ANALYZER_EXECUTION_COMPLETE]", stdout,
+                              f"未找到 fake_daily_market_analyzer 的成功執行標記 for combo REPO={force_repo}, DATA={force_data}")
 
         print("[E2E Test] test_force_refresh_options completed successfully.")
 

@@ -34,4 +34,5 @@ if __name__ == "__main__":
 
     output_data = {"script": "daily_market_analyzer", "args": vars(args), "cwd": os.getcwd()}
     print(json.dumps(output_data)) # 主要用於 _test_run.py 自身的斷言
+    print("[FAKE_ANALYZER_EXECUTION_COMPLETE]", flush=True)
     sys.exit(0)

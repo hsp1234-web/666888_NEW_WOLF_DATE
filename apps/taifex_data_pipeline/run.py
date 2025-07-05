@@ -47,4 +47,10 @@ if __name__ == "__main__":
 
     output_data = {"script": "taifex_data_pipeline", "args": vars(args), "cwd": os.getcwd()}
     print(json.dumps(output_data)) # 主要用於 _test_run.py 自身的斷言
+    if args.pipeline_step == 'load':
+        print("[FAKE_PIPELINE_EXECUTION_COMPLETE_LOAD]", flush=True)
+    elif args.pipeline_step == 'transform':
+        print("[FAKE_PIPELINE_EXECUTION_COMPLETE_TRANSFORM]", flush=True)
+    else: # 如果沒有 pipeline_step (雖然不太可能，因為 argparse 有 choices) 或其他情況
+        print("[FAKE_PIPELINE_EXECUTION_COMPLETE_UNKNOWN_STEP]", flush=True)
     sys.exit(0)
